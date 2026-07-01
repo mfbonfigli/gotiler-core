@@ -1,0 +1,110 @@
+name: Core CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-amd64:
+    name: Linux amd64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and test
+        run: bash scripts/build.sh linux-amd64
+
+  linux-arm64-build:
+    name: Linux arm64 build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build test binaries
+        run: bash scripts/build.sh linux-arm64 --skip-run
+
+      - name: Upload test binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: gotiler-core-linux-arm64-tests-${{ github.run_id }}
+          path: build/
+          if-no-files-found: error
+
+  linux-arm64-test:
+    name: Linux arm64 test
+    needs: linux-arm64-build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Download test binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: gotiler-core-linux-arm64-tests-${{ github.run_id }}
+          path: build
+
+      - name: Run tests
+        shell: bash
+        run: |
+          export PROJ_DATA="$PWD/build/share/linux-arm64"
+          shopt -s nullglob
+          for test_file in build/tests/linux-arm64/*; do
+            chmod +x "$test_file"
+            echo "Running $(basename "$test_file")..."
+            "$test_file" -test.v
+          done
+
+  windows-amd64-build:
+    name: Windows amd64 build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build test binaries
+        run: bash scripts/build.sh windows-amd64 --skip-run
+
+      - name: Upload test binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: gotiler-core-windows-amd64-tests-${{ github.run_id }}
+          path: build/
+          if-no-files-found: error
+
+  windows-amd64-test:
+    name: Windows amd64 test
+    needs: windows-amd64-build
+    runs-on: windows-latest
+    steps:
+      - name: Download test binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: gotiler-core-windows-amd64-tests-${{ github.run_id }}
+          path: build
+
+      - name: Run tests
+        shell: powershell
+        run: |
+          $env:PROJ_DATA = Join-Path $PWD "build\share\windows-amd64"
+          $Tests = Get-ChildItem -Path "build\tests\windows-amd64" -Filter "*.exe" -File
+          foreach ($Test in $Tests) {
+            Write-Host "Running $($Test.Name)..."
+            & $Test.FullName "-test.v"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Test failed: $($Test.Name)"
+            }
+          }
