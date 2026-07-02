@@ -30,6 +30,7 @@ type MockNode struct {
 	BuildCtx    context.Context
 	Transform   *model.Transform
 	MockRefine  model.RefineMode
+	Summaries   []model.AttributeSummary
 }
 
 func (n *MockNode) ToParentCRS() *model.Transform {
@@ -41,6 +42,10 @@ func (n *MockNode) RefineMode() model.RefineMode {
 		return model.RefineAdd
 	}
 	return n.MockRefine
+}
+
+func (n *MockNode) AttributeSummaries() []model.AttributeSummary {
+	return n.Summaries
 }
 
 func (n *MockNode) BoundingBox() geom.BoundingBox {

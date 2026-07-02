@@ -7,12 +7,14 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/mfbonfigli/gotiler-core/tiler/model"
 	"github.com/mfbonfigli/gotiler-core/tiler/pointcloud"
 )
 
 // ReaderOptions contains format-agnostic options passed to point cloud readers.
 type ReaderOptions struct {
-	EightBitColor bool
+	EightBitColor       bool
+	RequestedAttributes model.Attributes
 }
 
 // ReaderFactory opens a point cloud reader for one input file.

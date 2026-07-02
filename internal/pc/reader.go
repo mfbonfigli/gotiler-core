@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	"github.com/mfbonfigli/gotiler-core/tiler/geom"
+	"github.com/mfbonfigli/gotiler-core/tiler/model"
 	"github.com/mfbonfigli/gotiler-core/tiler/plugin"
 	"github.com/mfbonfigli/gotiler-core/tiler/pointcloud"
 )
@@ -22,10 +23,11 @@ type CombinedPointCloudReader struct {
 // NewCombinedPointCloudReader creates a new file reader for the files passed as input. If crs is the empty string, the
 // reader will autodetect the CRS from the input files, however an error is returned if the CRS is not consistent across
 // all of them or if it's not found in the files.
-func NewCombinedPointCloudReader(files []string, crs string, eightBitColor bool) (*CombinedPointCloudReader, error) {
+// attrs lists the optional per-point attributes to emit; nil means none.
+func NewCombinedPointCloudReader(files []string, crs string, eightBitColor bool, attrs model.Attributes) (*CombinedPointCloudReader, error) {
 	r := &CombinedPointCloudReader{}
 	crsProvided := crs != ""
-	readerOpts := plugin.ReaderOptions{EightBitColor: eightBitColor}
+	readerOpts := plugin.ReaderOptions{EightBitColor: eightBitColor, RequestedAttributes: attrs}
 	for _, f := range files {
 		factory, ok := plugin.PointCloudReaderFactoryFor(f)
 		if !ok {

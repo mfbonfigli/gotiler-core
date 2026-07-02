@@ -16,7 +16,7 @@ import (
 
 func TestReservoirLoader_InvalidSize(t *testing.T) {
 	conv := test.GetTestCoordinateConverterFactory()
-	loader := NewReservoirLoader(conv, nil, 0, 1, t.TempDir(), NewFileIoFactory())
+	loader := NewReservoirLoader(conv, nil, 0, 1, t.TempDir(), NewFileIoFactory(), nil)
 
 	reader := &pc.MockLasReader{
 		CRS: "EPSG:4978",
@@ -31,7 +31,7 @@ func TestReservoirLoader_InvalidSize(t *testing.T) {
 
 func TestReservoirLoader_EmptyInput(t *testing.T) {
 	conv := test.GetTestCoordinateConverterFactory()
-	loader := NewReservoirLoader(conv, nil, 10, 1, t.TempDir(), NewFileIoFactory())
+	loader := NewReservoirLoader(conv, nil, 10, 1, t.TempDir(), NewFileIoFactory(), nil)
 
 	reader := &pc.MockLasReader{
 		CRS: "EPSG:4978",
@@ -46,16 +46,16 @@ func TestReservoirLoader_EmptyInput(t *testing.T) {
 
 func TestReservoirLoader_BasicPipeline(t *testing.T) {
 	conv := test.GetTestCoordinateConverterFactory()
-	loader := NewReservoirLoader(conv, nil, 100, 1, t.TempDir(), NewFileIoFactory())
+	loader := NewReservoirLoader(conv, nil, 100, 1, t.TempDir(), NewFileIoFactory(), nil)
 
 	reader := &pc.MockLasReader{
 		CRS: "EPSG:4978",
 		Pts: []geom.Point64{
-			{Vector: model.Vector{X: 4399228.288985, Y: 855784.797006, Z: 0}, R: 255, G: 0, B: 0, Intensity: 1, Classification: 1, ReturnNumber: 1, NumberOfReturns: 3},
-			{Vector: model.Vector{X: 4399238.288985, Y: 855784.797006, Z: 0}, R: 0, G: 255, B: 0, Intensity: 2, Classification: 2, ReturnNumber: 2, NumberOfReturns: 3},
-			{Vector: model.Vector{X: 4399228.288985, Y: 855794.797006, Z: 0}, R: 0, G: 0, B: 255, Intensity: 3, Classification: 3, ReturnNumber: 3, NumberOfReturns: 3},
-			{Vector: model.Vector{X: 4399228.288985, Y: 855784.797006, Z: 10}, R: 128, G: 128, B: 128, Intensity: 4, Classification: 4, ReturnNumber: 1, NumberOfReturns: 2},
-			{Vector: model.Vector{X: 4399233.288985, Y: 855789.797006, Z: 5}, R: 64, G: 64, B: 64, Intensity: 5, Classification: 5, ReturnNumber: 2, NumberOfReturns: 2},
+			{Vector: model.Vector{X: 4399228.288985, Y: 855784.797006, Z: 0}, R: 255, G: 0, B: 0},
+			{Vector: model.Vector{X: 4399238.288985, Y: 855784.797006, Z: 0}, R: 0, G: 255, B: 0},
+			{Vector: model.Vector{X: 4399228.288985, Y: 855794.797006, Z: 0}, R: 0, G: 0, B: 255},
+			{Vector: model.Vector{X: 4399228.288985, Y: 855784.797006, Z: 10}, R: 128, G: 128, B: 128},
+			{Vector: model.Vector{X: 4399233.288985, Y: 855789.797006, Z: 5}, R: 64, G: 64, B: 64},
 		},
 	}
 
@@ -138,18 +138,6 @@ func TestReservoirLoader_BasicPipeline(t *testing.T) {
 		if buf[i].B != expectedPts[i].B {
 			t.Errorf("point %d B: expected %d got %d", i, expectedPts[i].B, buf[i].B)
 		}
-		if buf[i].Intensity != expectedPts[i].Intensity {
-			t.Errorf("point %d Intensity: expected %d got %d", i, expectedPts[i].Intensity, buf[i].Intensity)
-		}
-		if buf[i].Classification != expectedPts[i].Classification {
-			t.Errorf("point %d Classification: expected %d got %d", i, expectedPts[i].Classification, buf[i].Classification)
-		}
-		if buf[i].ReturnNumber != expectedPts[i].ReturnNumber {
-			t.Errorf("point %d ReturnNumber: expected %d got %d", i, expectedPts[i].ReturnNumber, buf[i].ReturnNumber)
-		}
-		if buf[i].NumberOfReturns != expectedPts[i].NumberOfReturns {
-			t.Errorf("point %d NumberOfReturns: expected %d got %d", i, expectedPts[i].NumberOfReturns, buf[i].NumberOfReturns)
-		}
 
 		ecefPt := result.localToGlobal.Forward(model.Vector{
 			X: float64(buf[i].X),
@@ -170,7 +158,7 @@ func TestReservoirLoader_BasicPipeline(t *testing.T) {
 
 func TestReservoirLoader_FewerPointsThanReservoir(t *testing.T) {
 	conv := test.GetTestCoordinateConverterFactory()
-	loader := NewReservoirLoader(conv, nil, 1000, 1, t.TempDir(), NewFileIoFactory())
+	loader := NewReservoirLoader(conv, nil, 1000, 1, t.TempDir(), NewFileIoFactory(), nil)
 
 	reader := &pc.MockLasReader{
 		CRS: "EPSG:4978",
@@ -198,13 +186,13 @@ func TestReservoirLoader_FewerPointsThanReservoir(t *testing.T) {
 func TestReservoirLoader_WithZOffset(t *testing.T) {
 	conv := test.GetTestCoordinateConverterFactory()
 	zOffset := mutator.NewZOffset(5.0)
-	loader := NewReservoirLoader(conv, zOffset, 10, 1, t.TempDir(), NewFileIoFactory())
+	loader := NewReservoirLoader(conv, zOffset, 10, 1, t.TempDir(), NewFileIoFactory(), nil)
 
 	reader := &pc.MockLasReader{
 		CRS: "EPSG:4978",
 		Pts: []geom.Point64{
-			{Vector: model.Vector{X: 4399228.288985, Y: 855784.797006, Z: 0}, R: 100, G: 100, B: 100, Intensity: 1, Classification: 1},
-			{Vector: model.Vector{X: 4399238.288985, Y: 855784.797006, Z: 0}, R: 200, G: 200, B: 200, Intensity: 2, Classification: 2},
+			{Vector: model.Vector{X: 4399228.288985, Y: 855784.797006, Z: 0}, R: 100, G: 100, B: 100},
+			{Vector: model.Vector{X: 4399238.288985, Y: 855784.797006, Z: 0}, R: 200, G: 200, B: 200},
 		},
 	}
 
@@ -244,7 +232,7 @@ func TestReservoirLoader_MultipleWorkers(t *testing.T) {
 
 	// FIX: Scale dataset to ensure multiple batches fill worker thread slots
 	numPoints := (pipelineBatchSize * 4) + 50
-	loader := NewReservoirLoader(conv, nil, 100, 4, t.TempDir(), NewFileIoFactory())
+	loader := NewReservoirLoader(conv, nil, 100, 4, t.TempDir(), NewFileIoFactory(), nil)
 
 	pts := make([]geom.Point64, numPoints)
 	for i := range pts {
@@ -279,5 +267,163 @@ func TestReservoirLoader_MultipleWorkers(t *testing.T) {
 
 	if reader2.NumPoints() != numPoints {
 		t.Errorf("expected %d points in temp file, got %d", numPoints, reader2.NumPoints())
+	}
+}
+
+// TestReservoirLoader_GenericAttributes verifies the end-to-end attribute
+// pipeline: reader-provided attributes are packed by the workers, summaries
+// accumulate type/min/max/missing information, and packed values survive the
+// temp-file round-trip through the io factory.
+func TestReservoirLoader_GenericAttributes(t *testing.T) {
+	conv := test.GetTestCoordinateConverterFactory()
+	ioFactory := NewFileIoFactory()
+	requested := model.NewAttributes("Intensity", "amplification", "not_in_source")
+	loader := NewReservoirLoader(conv, nil, 100, 2, t.TempDir(), ioFactory, requested)
+
+	mkAttrs := func(intensity uint16, amp float32) []model.Attribute {
+		return []model.Attribute{
+			{Name: "intensity", Type: model.AttributeUint16, Value: intensity},
+			{Name: "amplification", Type: model.AttributeFloat32, Value: amp},
+		}
+	}
+	type wanted struct {
+		intensity uint16
+		amp       float32
+	}
+	wantSet := map[wanted]bool{
+		{7, 1.5}:  true,
+		{3, -2.5}: true,
+		{9, 0.5}:  true,
+	}
+	reader := &pc.MockLasReader{
+		CRS: "EPSG:4978",
+		Pts: []geom.Point64{
+			{Vector: model.Vector{X: 4399228.288985, Y: 855784.797006, Z: 0}, Attributes: mkAttrs(7, 1.5)},
+			{Vector: model.Vector{X: 4399238.288985, Y: 855784.797006, Z: 0}, Attributes: mkAttrs(3, -2.5)},
+			{Vector: model.Vector{X: 4399228.288985, Y: 855794.797006, Z: 0}, Attributes: mkAttrs(9, 0.5)},
+		},
+	}
+
+	result, err := loader.Run(reader, context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(result.tempFilePath) })
+
+	if len(result.attrSummaries) != 3 {
+		t.Fatalf("expected 3 summaries, got %d", len(result.attrSummaries))
+	}
+	intensitySummary := result.attrSummaries[0]
+	if intensitySummary.Name != "intensity" || intensitySummary.Type != model.AttributeUint16 || intensitySummary.SkipIncomplete {
+		t.Errorf("unexpected intensity summary: %+v", intensitySummary)
+	}
+	if intensitySummary.Min != uint16(3) || intensitySummary.Max != uint16(9) {
+		t.Errorf("intensity min/max: got %v/%v want 3/9", intensitySummary.Min, intensitySummary.Max)
+	}
+	ampSummary := result.attrSummaries[1]
+	if ampSummary.Type != model.AttributeFloat32 || ampSummary.SkipIncomplete {
+		t.Errorf("unexpected amplification summary: %+v", ampSummary)
+	}
+	if ampSummary.Min != float32(-2.5) || ampSummary.Max != float32(1.5) {
+		t.Errorf("amplification min/max: got %v/%v want -2.5/1.5", ampSummary.Min, ampSummary.Max)
+	}
+	missingSummary := result.attrSummaries[2]
+	if !missingSummary.SkipIncomplete || missingSummary.Type != "" {
+		t.Errorf("unexpected summary for absent attribute: %+v", missingSummary)
+	}
+
+	// Round-trip through the io factory, which was fed the summaries during Run.
+	reader2, err := ioFactory.NewReader(result.tempFilePath)
+	if err != nil {
+		t.Fatalf("failed to open temp file: %v", err)
+	}
+	defer reader2.Close()
+	if reader2.NumPoints() != 3 {
+		t.Fatalf("expected 3 points in temp file, got %d", reader2.NumPoints())
+	}
+	buf, readErr := reader2.NextBatch(make([]model.Point, 0, 3))
+	if readErr != nil && readErr != io.EOF {
+		t.Fatalf("failed to read points from temp file: %v", readErr)
+	}
+	if len(buf) != 3 {
+		t.Fatalf("expected 3 points, got %d", len(buf))
+	}
+	entries, size := model.AttributeLayout(result.attrSummaries)
+	if size != 6 || len(entries) != 2 {
+		t.Fatalf("unexpected layout: %d entries, %d bytes", len(entries), size)
+	}
+	for i, pt := range buf {
+		if len(pt.Attributes) != size {
+			t.Fatalf("point %d: attribute values are %d bytes, want %d", i, len(pt.Attributes), size)
+		}
+		iv, err := model.DecodeAttributeValue(pt.Attributes[entries[0].Offset:], entries[0].Type)
+		if err != nil {
+			t.Fatalf("decode intensity: %v", err)
+		}
+		av, err := model.DecodeAttributeValue(pt.Attributes[entries[1].Offset:], entries[1].Type)
+		if err != nil {
+			t.Fatalf("decode amplification: %v", err)
+		}
+		got := wanted{intensity: iv.(uint16), amp: av.(float32)}
+		if !wantSet[got] {
+			t.Errorf("point %d: unexpected attribute values %+v", i, got)
+		}
+		delete(wantSet, got)
+	}
+	if len(wantSet) != 0 {
+		t.Errorf("missing attribute value combinations: %v", wantSet)
+	}
+}
+
+// classificationFilter drops points whose "classification" attribute matches
+// the discard value, exercising attribute-aware mutators.
+type classificationFilter struct {
+	discard uint8
+}
+
+func (m *classificationFilter) Mutate(pt model.Point, attrs []model.Attribute, t model.Transform) (model.Point, []model.Attribute, bool) {
+	for _, a := range attrs {
+		if a.Name == "classification" {
+			if v, ok := a.Value.(uint8); ok && v == m.discard {
+				return pt, attrs, false
+			}
+		}
+	}
+	return pt, attrs, true
+}
+
+// TestReservoirLoader_AttributeAwareMutator verifies that mutators receive the
+// reader-provided attributes and can filter points based on them.
+func TestReservoirLoader_AttributeAwareMutator(t *testing.T) {
+	conv := test.GetTestCoordinateConverterFactory()
+	ioFactory := NewFileIoFactory()
+	requested := model.NewAttributes("classification")
+	loader := NewReservoirLoader(conv, &classificationFilter{discard: 7}, 100, 2, t.TempDir(), ioFactory, requested)
+
+	mkAttrs := func(class uint8) []model.Attribute {
+		return []model.Attribute{{Name: "classification", Type: model.AttributeUint8, Value: class}}
+	}
+	reader := &pc.MockLasReader{
+		CRS: "EPSG:4978",
+		Pts: []geom.Point64{
+			{Vector: model.Vector{X: 4399228.288985, Y: 855784.797006, Z: 0}, Attributes: mkAttrs(2)},
+			{Vector: model.Vector{X: 4399238.288985, Y: 855784.797006, Z: 0}, Attributes: mkAttrs(7)}, // dropped
+			{Vector: model.Vector{X: 4399228.288985, Y: 855794.797006, Z: 0}, Attributes: mkAttrs(5)},
+			{Vector: model.Vector{X: 4399230.288985, Y: 855786.797006, Z: 0}, Attributes: mkAttrs(7)}, // dropped
+		},
+	}
+
+	result, err := loader.Run(reader, context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(result.tempFilePath) })
+
+	if result.totalPoints != 2 {
+		t.Fatalf("expected 2 points after filtering, got %d", result.totalPoints)
+	}
+	summary := result.attrSummaries[0]
+	if summary.Min != uint8(2) || summary.Max != uint8(5) {
+		t.Errorf("classification min/max should reflect only kept points: got %v/%v want 2/5", summary.Min, summary.Max)
 	}
 }

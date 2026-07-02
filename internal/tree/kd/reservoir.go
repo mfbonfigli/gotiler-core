@@ -31,6 +31,7 @@ type reservoirLoaderResult struct {
 	totalPoints   int
 	localToGlobal model.Transform
 	tempFilePath  string // path to temporary binary file with all converted points
+	attrSummaries []model.AttributeSummary
 }
 
 // reservoirLoader reads LAS files, converts coordinates and stores them
@@ -46,13 +47,15 @@ type reservoirLoader struct {
 	reservoirSize int
 	tempFolder    string
 	ioFactory     IoFactory
+	attributes    model.Attributes
 
 	rawBatchPool   *utils.SlicePool[geom.Point64]
 	localBatchPool *utils.SlicePool[model.Point]
 	flatCoordsPool *utils.SlicePool[float64]
 }
 
-// NewReservoirLoader creates a configured loader.
+// NewReservoirLoader creates a configured loader. attrs lists the optional
+// per-point attributes to store; nil means none.
 func NewReservoirLoader(
 	convFactory coor.ConverterFactory,
 	mut mutator.Mutator,
@@ -60,6 +63,7 @@ func NewReservoirLoader(
 	numWorkers int,
 	tempFolder string,
 	ioFactory IoFactory,
+	attrs model.Attributes,
 ) *reservoirLoader {
 	return &reservoirLoader{
 		convFactory:    convFactory,
@@ -68,6 +72,7 @@ func NewReservoirLoader(
 		reservoirSize:  reservoirSize,
 		tempFolder:     tempFolder,
 		ioFactory:      ioFactory,
+		attributes:     attrs,
 		rawBatchPool:   utils.NewSlicePool[geom.Point64](pipelineBatchSize),
 		localBatchPool: utils.NewSlicePool[model.Point](pipelineBatchSize),
 		flatCoordsPool: utils.NewSlicePool[float64](pipelineBatchSize * 3),
@@ -107,9 +112,22 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 	}
 	defer c.Cleanup()
 
-	localToGlobal, firstLocalPt, readErr := baseline(reader, c, s.mut)
+	localToGlobal, firstLocalPt, firstRawAttrs, readErr := baseline(reader, c, s.mut)
 	if readErr != nil {
 		return nil, readErr
+	}
+	attrSummaries := initializeAttributeSummaries(s.attributes, firstRawAttrs)
+	packer := newAttributePacker(attrSummaries)
+	if packer.size > 0 {
+		blob := make(model.AttributeValues, packer.size)
+		if err := packer.pack(blob, firstRawAttrs); err != nil {
+			return nil, err
+		}
+		firstLocalPt.Attributes = blob
+	}
+	stats := newAttrStats(packer.entries)
+	if f, ok := s.ioFactory.(attributeIoFactory); ok {
+		f.SetAttributeSummaries(attrSummaries)
 	}
 
 	tmpFile, err := os.CreateTemp(s.tempFolder, "points_*.bin")
@@ -238,7 +256,19 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 					continue
 				}
 
+				// One shared backing array per batch: each kept point gets a
+				// sub-slice, avoiding a per-point allocation for its packed values.
+				var blobBacking []byte
+				blobCursor := 0
+				if packer.size > 0 {
+					blobBacking = make([]byte, n*packer.size)
+				}
+				packErr := false
 				for i, rawPt := range *rawBatchPtr {
+					// Drop the reader-provided attribute references eagerly so
+					// the pooled raw batch does not keep them (and their boxed
+					// values) alive once recycled.
+					(*rawBatchPtr)[i].Attributes = nil
 					offset := i * 3
 					ecefPt := geom.Point64{
 						Vector: model.Vector{
@@ -246,23 +276,40 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 							Y: (*flatCoordsPtr)[offset+1],
 							Z: (*flatCoordsPtr)[offset+2],
 						},
-						R:               rawPt.R,
-						G:               rawPt.G,
-						B:               rawPt.B,
-						Intensity:       rawPt.Intensity,
-						Classification:  rawPt.Classification,
-						ReturnNumber:    rawPt.ReturnNumber,
-						NumberOfReturns: rawPt.NumberOfReturns,
+						R: rawPt.R,
+						G: rawPt.G,
+						B: rawPt.B,
 					}
 					localPt := toLocalPoint(ecefPt, localToGlobal)
+					rawAttrs := rawPt.Attributes
 					keep := true
 					if s.mut != nil {
-						localPt, keep = s.mut.Mutate(localPt, localToGlobal)
+						localPt, rawAttrs, keep = s.mut.Mutate(localPt, rawAttrs, localToGlobal)
 						if !keep {
 							continue
 						}
 					}
+					if packer.size > 0 {
+						blob := blobBacking[blobCursor : blobCursor+packer.size : blobCursor+packer.size]
+						blobCursor += packer.size
+						if err := packer.pack(blob, rawAttrs); err != nil {
+							select {
+							case errCh <- err:
+							default:
+							}
+							cancel()
+							packErr = true
+							break
+						}
+						localPt.Attributes = blob
+					}
 					*localBatchPtr = append(*localBatchPtr, localPt)
+				}
+				if packErr {
+					s.flatCoordsPool.Put(flatCoordsPtr)
+					s.localBatchPool.Put(localBatchPtr)
+					s.rawBatchPool.Put(rawBatchPtr)
+					continue
 				}
 
 				s.flatCoordsPool.Put(flatCoordsPtr)
@@ -294,6 +341,26 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 	}
 	sample = make([]model.Point, 0, s.reservoirSize)
 
+	// sampleBlobs owns the packed attribute values of the reservoir-sampled
+	// points, indexed by reservoir slot. Sampled points live for the whole run
+	// and must NOT retain their batch's shared blob backing array: one retained
+	// point would pin the values of its entire batch, and with a large
+	// reservoir nearly every batch ends up pinned, keeping the whole dataset's
+	// attribute memory live. Copying into a slot-indexed arena bounds the
+	// retained memory to reservoirSize*attrSize with no per-point allocations.
+	var sampleBlobs []byte
+	if packer.size > 0 {
+		sampleBlobs = make([]byte, s.reservoirSize*packer.size)
+	}
+	adoptSample := func(pt model.Point, slot int) model.Point {
+		if len(pt.Attributes) > 0 {
+			dst := sampleBlobs[slot*packer.size : (slot+1)*packer.size : (slot+1)*packer.size]
+			copy(dst, pt.Attributes)
+			pt.Attributes = dst
+		}
+		return pt
+	}
+
 	go func() {
 		defer collectorWg.Done()
 
@@ -305,7 +372,8 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 		} else {
 			totalPoints = 1
 			updateBounds(&bounds, firstLocalPt)
-			sample = append(sample, firstLocalPt)
+			stats.observe(firstLocalPt.Attributes)
+			sample = append(sample, adoptSample(firstLocalPt, 0))
 		}
 
 		for localBatchPtr := range localCh {
@@ -324,14 +392,15 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 			for _, localPt := range *localBatchPtr {
 				totalPoints++
 				updateBounds(&bounds, localPt)
+				stats.observe(localPt.Attributes)
 
 				if totalPoints <= s.reservoirSize {
-					sample = append(sample, localPt)
+					sample = append(sample, adoptSample(localPt, len(sample)))
 				} else {
 					// Use deterministic local generator instance
 					j := localRand.IntN(totalPoints)
 					if j < s.reservoirSize {
-						sample[j] = localPt
+						sample[j] = adoptSample(localPt, j)
 					}
 				}
 			}
@@ -397,6 +466,9 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 		return nil, fmt.Errorf("no valid points found")
 	}
 
+	packer.applyMissing(attrSummaries)
+	stats.apply(attrSummaries)
+
 	tree.ReportProgress(reporter, tree.ProgressUpdate{
 		Phase:       "reading",
 		Percent:     100,
@@ -412,47 +484,45 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 		totalPoints:   totalPoints,
 		localToGlobal: localToGlobal,
 		tempFilePath:  name,
+		attrSummaries: attrSummaries,
 	}, nil
 }
 
 // baseline returns the local-to-global transform for the first valid point, and the point in local coords.
-func baseline(reader pointcloud.Reader, c coor.Converter, mut mutator.Mutator) (model.Transform, model.Point, error) {
+func baseline(reader pointcloud.Reader, c coor.Converter, mut mutator.Mutator) (model.Transform, model.Point, []model.Attribute, error) {
 	sourceCRS := reader.GetCRS()
 	for {
 		first, err := reader.GetNext()
 		if err != nil {
-			return model.Transform{}, model.Point{}, err
+			return model.Transform{}, model.Point{}, nil, err
 		}
 		ecefPt, err := transformToECEF(c, first, sourceCRS)
 		if err != nil {
-			return model.Transform{}, model.Point{}, err
+			return model.Transform{}, model.Point{}, nil, err
 		}
 		localToGlobal := geom.LocalToGlobalTransformFromPoint(ecefPt.X, ecefPt.Y, ecefPt.Z)
 		localPt := toLocalPoint(ecefPt, localToGlobal)
+		attrs := first.Attributes
 		keep := true
 		if mut != nil {
-			localPt, keep = mut.Mutate(localPt, localToGlobal)
+			localPt, attrs, keep = mut.Mutate(localPt, attrs, localToGlobal)
 			if !keep {
 				continue
 			}
 		}
-		return localToGlobal, localPt, nil
+		return localToGlobal, localPt, attrs, nil
 	}
 }
 
 func toLocalPoint(ecefPt geom.Point64, l2g model.Transform) model.Point {
 	localCoords := l2g.Inverse(ecefPt.Vector)
 	return model.Point{
-		X:               float32(localCoords.X),
-		Y:               float32(localCoords.Y),
-		Z:               float32(localCoords.Z),
-		R:               ecefPt.R,
-		G:               ecefPt.G,
-		B:               ecefPt.B,
-		Intensity:       ecefPt.Intensity,
-		Classification:  ecefPt.Classification,
-		ReturnNumber:    ecefPt.ReturnNumber,
-		NumberOfReturns: ecefPt.NumberOfReturns,
+		X: float32(localCoords.X),
+		Y: float32(localCoords.Y),
+		Z: float32(localCoords.Z),
+		R: ecefPt.R,
+		G: ecefPt.G,
+		B: ecefPt.B,
 	}
 }
 

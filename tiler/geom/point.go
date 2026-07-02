@@ -9,26 +9,21 @@ import (
 // Point64 contains point-cloud point data with double-precision coordinates.
 type Point64 struct {
 	model.Vector
-	R               uint8
-	G               uint8
-	B               uint8
-	Intensity       uint16
-	Classification  uint8
-	ReturnNumber    uint8
-	NumberOfReturns uint8
+	R          uint8
+	G          uint8
+	B          uint8
+	Attributes []model.Attribute
 }
 
 // NewPoint builds a model.Point from coordinates and standard attributes.
-func NewPoint(X, Y, Z float32, R, G, B uint8, Intensity uint16, Classification uint8) model.Point {
+func NewPoint(X, Y, Z float32, R, G, B uint8) model.Point {
 	return model.Point{
-		X:              X,
-		Y:              Y,
-		Z:              Z,
-		R:              R,
-		G:              G,
-		B:              B,
-		Intensity:      Intensity,
-		Classification: Classification,
+		X: X,
+		Y: Y,
+		Z: Z,
+		R: R,
+		G: G,
+		B: B,
 	}
 }
 

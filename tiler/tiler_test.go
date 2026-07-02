@@ -30,7 +30,7 @@ func TestTilerDefaults(t *testing.T) {
 	}
 	// this returns an error due to a non-esitant path
 	// but we ignore it on purpose for the sake of this test
-	l, _ := tiler.pointcloudReaderProvider([]string{""}, "EPSG:123", true)
+	l, _ := tiler.pointcloudReaderProvider([]string{""}, "EPSG:123", true, model.DefaultAttributes())
 	switch l.(type) {
 	case *pc.CombinedPointCloudReader:
 	default:
@@ -65,7 +65,7 @@ func TestTilerProcessFile(t *testing.T) {
 	tiler.treeProvider = func(opts tree.Options, output string) tree.Tree {
 		return tr
 	}
-	tiler.pointcloudReaderProvider = func(inputFiles []string, sourceCRS string, eightbit bool) (pointcloud.Reader, error) {
+	tiler.pointcloudReaderProvider = func(inputFiles []string, sourceCRS string, eightbit bool, attrs model.Attributes) (pointcloud.Reader, error) {
 		return l, nil
 	}
 
@@ -117,7 +117,7 @@ func TestTilerProcessFileUsesConfiguredTreeProvider(t *testing.T) {
 	tiler.writerProvider = func(folder string, opts *TilerOptions) (writer.Writer, error) {
 		return w, nil
 	}
-	tiler.pointcloudReaderProvider = func(inputFiles []string, sourceCRS string, eightbit bool) (pointcloud.Reader, error) {
+	tiler.pointcloudReaderProvider = func(inputFiles []string, sourceCRS string, eightbit bool, attrs model.Attributes) (pointcloud.Reader, error) {
 		return l, nil
 	}
 
@@ -164,7 +164,7 @@ func TestTilerProcessFolder(t *testing.T) {
 		return tr
 	}
 	files := []string{}
-	tiler.pointcloudReaderProvider = func(inputFiles []string, sourceCRS string, eightbit bool) (pointcloud.Reader, error) {
+	tiler.pointcloudReaderProvider = func(inputFiles []string, sourceCRS string, eightbit bool, attrs model.Attributes) (pointcloud.Reader, error) {
 		files = append(files, inputFiles...)
 		return l, nil
 	}

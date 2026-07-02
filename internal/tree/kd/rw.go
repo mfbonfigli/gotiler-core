@@ -15,13 +15,11 @@ import (
 )
 
 const (
-	pointRecordSize = 20 // X,Y,Z float32 (12) + R,G,B uint8 (3) + Intensity uint16 (2) + Classification uint8 (1) + ReturnNumber uint8 (1) + NumberOfReturns uint8 (1)
-	pointsPerChunk  = 4096
-	chunkBufferSize = pointsPerChunk * pointRecordSize // ~80KB sequential blocks
+	basePointRecordSize = 15 // X,Y,Z float32 (12) + R,G,B uint8 (3); optional attributes follow as packed values
+	pointRecordSize     = basePointRecordSize
+	pointsPerChunk      = 4096
+	chunkBufferSize     = pointsPerChunk * pointRecordSize // ~80KB sequential blocks
 )
-
-// scartchPool provides a shared pool of buffer to read chunks of points
-var scratchPool = utils.NewSlicePool[byte](pointRecordSize)
 
 // PointReader reads point records from a backing store.
 type PointReader interface {
@@ -45,7 +43,14 @@ type IoFactory interface {
 }
 
 // fileIoFactory is the default IoFactory backed by disk files.
-type fileIoFactory struct{}
+type attributeIoFactory interface {
+	SetAttributeSummaries([]model.AttributeSummary)
+}
+
+type fileIoFactory struct {
+	mu            sync.RWMutex
+	attrSummaries []model.AttributeSummary
+}
 
 // NewFileIoFactory returns the default file-based IoFactory.
 func NewFileIoFactory() IoFactory {
@@ -53,26 +58,44 @@ func NewFileIoFactory() IoFactory {
 }
 
 func (f *fileIoFactory) NewReader(filePath string) (PointReader, error) {
-	return NewFilePointReader(filePath)
+	f.mu.RLock()
+	summaries := cloneAttributeSummaries(f.attrSummaries)
+	f.mu.RUnlock()
+	return NewFilePointReaderWithAttributes(filePath, summaries)
 }
 
 func (f *fileIoFactory) NewWriter(name string) (PointWriter, error) {
-	return NewFilePointWriter(name)
+	f.mu.RLock()
+	summaries := cloneAttributeSummaries(f.attrSummaries)
+	f.mu.RUnlock()
+	return NewFilePointWriterWithAttributes(name, summaries)
 }
 
-// filePointReader reads 32-byte point records from a raw binary file efficiently.
+func (f *fileIoFactory) SetAttributeSummaries(summaries []model.AttributeSummary) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.attrSummaries = cloneAttributeSummaries(summaries)
+}
+
+// filePointReader reads fixed-size point records from a raw binary file efficiently.
 // It assigns large, sequential 256 KB blocks to calling goroutines to preserve
 // the OS filesystem's native read-ahead caching mechanism.
 type filePointReader struct {
-	file      *os.File
-	numPoints int64
-	nextChunk atomic.Int64
-	closed    atomic.Bool
-	chunkPool *utils.SlicePool[byte]
+	file       *os.File
+	numPoints  int64
+	recordSize int64
+	attrSize   int // bytes of packed attribute values per record, 0 when none
+	nextChunk  atomic.Int64
+	closed     atomic.Bool
+	chunkPool  *utils.SlicePool[byte]
 }
 
 // NewFilePointReader opens the given file and computes numPoints from the file size.
 func NewFilePointReader(filePath string) (PointReader, error) {
+	return NewFilePointReaderWithAttributes(filePath, nil)
+}
+
+func NewFilePointReaderWithAttributes(filePath string, summaries []model.AttributeSummary) (PointReader, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
@@ -83,10 +106,13 @@ func NewFilePointReader(filePath string) (PointReader, error) {
 		return nil, err
 	}
 
+	recordSize := pointRecordSizeFor(summaries)
 	return &filePointReader{
-		file:      f,
-		numPoints: info.Size() / pointRecordSize,
-		chunkPool: utils.NewSlicePool[byte](chunkBufferSize),
+		file:       f,
+		numPoints:  info.Size() / int64(recordSize),
+		recordSize: int64(recordSize),
+		attrSize:   recordSize - basePointRecordSize,
+		chunkPool:  utils.NewSlicePool[byte](pointsPerChunk * recordSize),
 	}, nil
 }
 
@@ -116,31 +142,42 @@ func (r *filePointReader) NextBatch(dest []model.Point) ([]model.Point, error) {
 	}
 	pointsToRead := endPoint - startPoint
 
-	bufPtr := r.chunkPool.GetWithMinCapacity(int(pointsToRead) * pointRecordSize)
+	recordSize := int(r.recordSize)
+	bufPtr := r.chunkPool.GetWithMinCapacity(int(pointsToRead) * recordSize)
 	defer r.chunkPool.Put(bufPtr)
-	buf := (*bufPtr)[:int(pointsToRead)*pointRecordSize]
+	buf := (*bufPtr)[:int(pointsToRead)*recordSize]
 
 	// Large sequential disk read
-	offset := startPoint * pointRecordSize
+	offset := startPoint * r.recordSize
 	if _, err := r.file.ReadAt(buf, offset); err != nil && err != io.EOF {
 		return dest, err
 	}
 
+	// One shared backing array for all attribute values in the chunk: the read
+	// buffer is pooled and reused, so the packed values must be copied out of it.
+	var blobBacking []byte
+	if r.attrSize > 0 {
+		blobBacking = make([]byte, int(pointsToRead)*r.attrSize)
+	}
+
 	// Parse points sequentially out of the memory chunk
 	for i := int64(0); i < pointsToRead; i++ {
-		pIdx := i * pointRecordSize
-		dest = append(dest, model.Point{
-			X:               math.Float32frombits(binary.LittleEndian.Uint32(buf[pIdx : pIdx+4])),
-			Y:               math.Float32frombits(binary.LittleEndian.Uint32(buf[pIdx+4 : pIdx+8])),
-			Z:               math.Float32frombits(binary.LittleEndian.Uint32(buf[pIdx+8 : pIdx+12])),
-			R:               buf[pIdx+12],
-			G:               buf[pIdx+13],
-			B:               buf[pIdx+14],
-			Intensity:       binary.LittleEndian.Uint16(buf[pIdx+15 : pIdx+17]),
-			Classification:  buf[pIdx+17],
-			ReturnNumber:    buf[pIdx+18],
-			NumberOfReturns: buf[pIdx+19],
-		})
+		pIdx := int(i) * recordSize
+		pt := model.Point{
+			X: math.Float32frombits(binary.LittleEndian.Uint32(buf[pIdx : pIdx+4])),
+			Y: math.Float32frombits(binary.LittleEndian.Uint32(buf[pIdx+4 : pIdx+8])),
+			Z: math.Float32frombits(binary.LittleEndian.Uint32(buf[pIdx+8 : pIdx+12])),
+			R: buf[pIdx+12],
+			G: buf[pIdx+13],
+			B: buf[pIdx+14],
+		}
+		if r.attrSize > 0 {
+			blobStart := int(i) * r.attrSize
+			blob := blobBacking[blobStart : blobStart+r.attrSize : blobStart+r.attrSize]
+			copy(blob, buf[pIdx+basePointRecordSize:pIdx+recordSize])
+			pt.Attributes = blob
+		}
+		dest = append(dest, pt)
 	}
 
 	var returnErr error
@@ -158,27 +195,36 @@ func (r *filePointReader) Close() error {
 	return nil
 }
 
-// filePointWriter writes raw 18-byte point records to a file using bulk memory blocks.
+// filePointWriter writes raw point records to a file using bulk memory blocks.
 // All methods are safe for concurrent use.
 type filePointWriter struct {
-	file *os.File
-	bw   *bufio.Writer
-	mu   sync.Mutex
-	// scratch is an embedded array allocated once per writer lifecycle.
-	scratch [pointRecordSize]byte
+	file       *os.File
+	bw         *bufio.Writer
+	mu         sync.Mutex
+	recordSize int
+	attrSize   int // bytes of packed attribute values per record, 0 when none
+	scratch    []byte
 }
 
 // NewFilePointWriter creates a buffered writer using an optimized 256 KB streaming layout.
 func NewFilePointWriter(name string) (PointWriter, error) {
+	return NewFilePointWriterWithAttributes(name, nil)
+}
+
+func NewFilePointWriterWithAttributes(name string, summaries []model.AttributeSummary) (PointWriter, error) {
 	// Open with append mode. If the file already exists, we stream to the end of it.
 	f, err := os.OpenFile(name, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file %s: %w", name, err)
 	}
 
+	recordSize := pointRecordSizeFor(summaries)
 	return &filePointWriter{
-		file: f,
-		bw:   bufio.NewWriterSize(f, chunkBufferSize),
+		file:       f,
+		bw:         bufio.NewWriterSize(f, max(chunkBufferSize, pointsPerChunk*recordSize)),
+		recordSize: recordSize,
+		attrSize:   recordSize - basePointRecordSize,
+		scratch:    make([]byte, recordSize),
 	}, nil
 }
 
@@ -197,14 +243,21 @@ func (w *filePointWriter) WriteBatch(points []model.Point) error {
 		binary.LittleEndian.PutUint32(w.scratch[4:8], math.Float32bits(pt.Y))
 		binary.LittleEndian.PutUint32(w.scratch[8:12], math.Float32bits(pt.Z))
 
-		// Map remaining structural attributes
+		// Map the colors
 		w.scratch[12] = pt.R
 		w.scratch[13] = pt.G
 		w.scratch[14] = pt.B
-		binary.LittleEndian.PutUint16(w.scratch[15:17], pt.Intensity)
-		w.scratch[17] = pt.Classification
-		w.scratch[18] = pt.ReturnNumber
-		w.scratch[19] = pt.NumberOfReturns
+		if w.attrSize > 0 {
+			// Points carry pre-packed attribute values matching this writer's
+			// layout; a nil value writes zeros.
+			if len(pt.Attributes) != 0 && len(pt.Attributes) != w.attrSize {
+				return fmt.Errorf("point attribute values are %d bytes, writer layout expects %d", len(pt.Attributes), w.attrSize)
+			}
+			n := copy(w.scratch[basePointRecordSize:], pt.Attributes)
+			for i := basePointRecordSize + n; i < w.recordSize; i++ {
+				w.scratch[i] = 0
+			}
+		}
 
 		// Stream to the bufio block buffer
 		if _, err := w.bw.Write(w.scratch[:]); err != nil {
@@ -231,4 +284,18 @@ func (w *filePointWriter) Close() error {
 	}
 
 	return nil
+}
+
+func pointRecordSizeFor(summaries []model.AttributeSummary) int {
+	_, attrSize := model.AttributeLayout(summaries)
+	return basePointRecordSize + attrSize
+}
+
+func cloneAttributeSummaries(in []model.AttributeSummary) []model.AttributeSummary {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]model.AttributeSummary, len(in))
+	copy(out, in)
+	return out
 }

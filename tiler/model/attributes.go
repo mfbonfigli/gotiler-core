@@ -1,8 +1,8 @@
 package model
 
 import (
-	"fmt"
 	"strings"
+	"unicode"
 )
 
 // Standard optional per-point attribute names.
@@ -13,24 +13,62 @@ const (
 	AttrNumberOfReturns = "number_of_returns"
 )
 
-// knownAttributes is the registry of currently supported optional attribute names.
-var knownAttributes = map[string]struct{}{
-	AttrIntensity:       {},
-	AttrClassification:  {},
-	AttrReturnNumber:    {},
-	AttrNumberOfReturns: {},
+// AttributeType identifies the scalar data type of a per-point attribute.
+type AttributeType string
+
+const (
+	AttributeInt8    AttributeType = "int8"
+	AttributeUint8   AttributeType = "uint8"
+	AttributeInt16   AttributeType = "int16"
+	AttributeUint16  AttributeType = "uint16"
+	AttributeInt32   AttributeType = "int32"
+	AttributeUint32  AttributeType = "uint32"
+	AttributeInt64   AttributeType = "int64"
+	AttributeUint64  AttributeType = "uint64"
+	AttributeBool    AttributeType = "bool"
+	AttributeFloat32 AttributeType = "float32"
+	AttributeFloat64 AttributeType = "float64"
+)
+
+// Attribute is a reader-provided per-point attribute. Name is expected to be
+// canonicalized by the reader after applying any reader-specific aliases.
+type Attribute struct {
+	Name  string
+	Type  AttributeType
+	Value any
 }
 
-// Attributes is a set of optional per-point attribute names to include in output tiles.
-// The zero value (nil map) means no optional attributes are exported.
+// AttributeSummary describes one requested attribute that the tree stored.
+// SkipIncomplete is true when at least one point was missing the attribute, so
+// encoders should omit it.
+type AttributeSummary struct {
+	RequestedName  string
+	Name           string
+	Type           AttributeType
+	SkipIncomplete bool
+	Min            any
+	Max            any
+}
+
+// Attributes is an ordered list of optional per-point attribute names to include in output tiles.
+// The zero value (nil slice) means no optional attributes are exported.
 // Use DefaultAttributes() to get the default set with all supported attributes enabled.
-type Attributes map[string]struct{}
+type Attributes []string
 
 // NewAttributes creates an Attributes set containing the given names.
 func NewAttributes(names ...string) Attributes {
-	a := make(Attributes, len(names))
+	a := make(Attributes, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
 	for _, n := range names {
-		a[n] = struct{}{}
+		name := CanonicalAttributeName(n)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		a = append(a, name)
 	}
 	return a
 }
@@ -42,26 +80,94 @@ func DefaultAttributes() Attributes {
 
 // Has reports whether the named attribute is in the set.
 func (a Attributes) Has(name string) bool {
-	_, ok := a[name]
-	return ok
+	name = CanonicalAttributeName(name)
+	for _, attr := range a {
+		if CanonicalAttributeName(attr) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// Names returns a copy of the ordered attribute names.
+func (a Attributes) Names() []string {
+	out := make([]string, len(a))
+	copy(out, a)
+	return out
 }
 
 // ParseAttributes converts a slice of attribute name strings into an Attributes set.
-// Returns an error for any unrecognised name.
+// A value of "none" returns an empty set.
 func ParseAttributes(attrs []string) (Attributes, error) {
 	for _, a := range attrs {
 		if strings.TrimSpace(strings.ToLower(a)) == "none" {
-			return make(Attributes), nil
+			return Attributes{}, nil
 		}
 	}
-	set := make(Attributes, len(attrs))
-	for _, a := range attrs {
-		name := strings.TrimSpace(strings.ToLower(a))
-		if _, ok := knownAttributes[name]; !ok {
-			return nil, fmt.Errorf("unknown attribute %q: supported values are %q, %q, %q, %q",
-				a, AttrIntensity, AttrClassification, AttrReturnNumber, AttrNumberOfReturns)
+	return NewAttributes(attrs...), nil
+}
+
+// CanonicalAttributeName normalizes an attribute name for tolerant matching.
+// Whitespace is removed and casing is folded.
+func CanonicalAttributeName(name string) string {
+	name = strings.TrimSpace(strings.ToLower(name))
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		if unicode.IsSpace(r) {
+			continue
 		}
-		set[name] = struct{}{}
+		b.WriteRune(r)
 	}
-	return set, nil
+	return b.String()
+}
+
+// AttributeTypeSize returns the byte size used to serialize one scalar value.
+func AttributeTypeSize(t AttributeType) (int, bool) {
+	switch t {
+	case AttributeInt8, AttributeUint8, AttributeBool:
+		return 1, true
+	case AttributeInt16, AttributeUint16:
+		return 2, true
+	case AttributeInt32, AttributeUint32, AttributeFloat32:
+		return 4, true
+	case AttributeInt64, AttributeUint64, AttributeFloat64:
+		return 8, true
+	default:
+		return 0, false
+	}
+}
+
+// AttributeLayoutEntry describes where one attribute value lives inside a
+// point's packed AttributeValues.
+type AttributeLayoutEntry struct {
+	Name   string
+	Type   AttributeType
+	Offset int
+	Size   int
+	// SummaryIndex is the index of the originating entry in the summary list
+	// the layout was computed from.
+	SummaryIndex int
+}
+
+// AttributeLayout computes the packed value layout for the given summaries.
+// Summaries whose type has no defined size (e.g. requested attributes that were
+// never resolved against the source data) are excluded. The returned total is
+// the byte size of one point's packed AttributeValues.
+func AttributeLayout(summaries []AttributeSummary) (entries []AttributeLayoutEntry, total int) {
+	for i, summary := range summaries {
+		size, ok := AttributeTypeSize(summary.Type)
+		if !ok {
+			continue
+		}
+		entries = append(entries, AttributeLayoutEntry{
+			Name:         summary.Name,
+			Type:         summary.Type,
+			Offset:       total,
+			Size:         size,
+			SummaryIndex: i,
+		})
+		total += size
+	}
+	return entries, total
 }

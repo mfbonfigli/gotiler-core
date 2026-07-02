@@ -16,13 +16,13 @@ func NewPipeline(m ...Mutator) *Pipeline {
 	}
 }
 
-func (p *Pipeline) Mutate(pt model.Point, localToGlobal model.Transform) (model.Point, bool) {
+func (p *Pipeline) Mutate(pt model.Point, attrs []model.Attribute, localToGlobal model.Transform) (model.Point, []model.Attribute, bool) {
 	for _, m := range p.mutators {
 		keep := true
-		pt, keep = m.Mutate(pt, localToGlobal)
+		pt, attrs, keep = m.Mutate(pt, attrs, localToGlobal)
 		if !keep {
-			return pt, false
+			return pt, attrs, false
 		}
 	}
-	return pt, true
+	return pt, attrs, true
 }

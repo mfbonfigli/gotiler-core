@@ -16,13 +16,13 @@ import (
 
 func TestProduce(t *testing.T) {
 	pt1 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(1, 2, 3, 4, 5, 6, 7, 8),
+		Pt: geom.NewPoint(1, 2, 3, 4, 5, 6),
 	}
 	pt2 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(9, 10, 11, 12, 13, 14, 15, 16),
+		Pt: geom.NewPoint(9, 10, 11, 12, 13, 14),
 	}
 	pt3 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(17, 18, 19, 20, 21, 22, 23, 24),
+		Pt: geom.NewPoint(17, 18, 19, 20, 21, 22),
 	}
 	pt1.Next = pt2
 	pt2.Next = pt3
@@ -96,13 +96,13 @@ func TestProduce(t *testing.T) {
 func TestProduceWithCancelOk(t *testing.T) {
 
 	pt1 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(1, 2, 3, 4, 5, 6, 7, 8),
+		Pt: geom.NewPoint(1, 2, 3, 4, 5, 6),
 	}
 	pt2 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(9, 10, 11, 12, 13, 14, 15, 16),
+		Pt: geom.NewPoint(9, 10, 11, 12, 13, 14),
 	}
 	pt3 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(17, 18, 19, 20, 21, 22, 23, 24),
+		Pt: geom.NewPoint(17, 18, 19, 20, 21, 22),
 	}
 	pt1.Next = pt2
 	pt2.Next = pt3

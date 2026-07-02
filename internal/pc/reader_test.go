@@ -36,7 +36,7 @@ func writeEmbeddedLasFiles(t *testing.T) ([]string, string) {
 func TestCombinedReader(t *testing.T) {
 	files, _ := writeEmbeddedLasFiles(t)
 
-	r, err := NewCombinedPointCloudReader(files, "EPSG:32633", false)
+	r, err := NewCombinedPointCloudReader(files, "EPSG:32633", false, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestCombinedReader(t *testing.T) {
 func TestCombinedReaderConcurrency(t *testing.T) {
 	files, _ := writeEmbeddedLasFiles(t)
 
-	r, err := NewCombinedPointCloudReader(files, "EPSG:32633", false)
+	r, err := NewCombinedPointCloudReader(files, "EPSG:32633", false, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

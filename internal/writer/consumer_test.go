@@ -46,11 +46,12 @@ func TestConsume(t *testing.T) {
 	wg.Add(1)
 	go c.Consume(wc, ec, wg)
 
-	pts := []model.Point{
-		{X: 0, Y: 0, Z: 0, R: 160, G: 166, B: 203, Intensity: 7, Classification: 3},
-		{X: 1, Y: 3, Z: 4, R: 186, G: 200, B: 237, Intensity: 7, Classification: 3},
-		{X: 2, Y: 6, Z: 8, R: 156, G: 167, B: 204, Intensity: 7, Classification: 3},
-	}
+	attrs := model.DefaultAttributes()
+	pts := withDefaultPointAttributes(attrs, 7, 3, []model.Point{
+		{X: 0, Y: 0, Z: 0, R: 160, G: 166, B: 203},
+		{X: 1, Y: 3, Z: 4, R: 186, G: 200, B: 237},
+		{X: 2, Y: 6, Z: 8, R: 156, G: 167, B: 204},
+	})
 
 	pt1 := &geom.LinkedPoint{
 		Pt: pts[0],
@@ -81,6 +82,7 @@ func TestConsume(t *testing.T) {
 		Leaf:      true,
 		GeomError: 20,
 		Transform: &tr,
+		Summaries: makeStandardSummaries(attrs),
 	}
 
 	tmp, err := os.MkdirTemp(os.TempDir(), "tst")
@@ -126,18 +128,19 @@ func TestConsume(t *testing.T) {
 }
 
 func TestConsumeGltf(t *testing.T) {
-	c := NewStandardConsumer(WithGeometryEncoder(NewGltfEncoder("d.glb", model.DefaultAttributes())))
+	attrs := model.DefaultAttributes()
+	c := NewStandardConsumer(WithGeometryEncoder(NewGltfEncoder("d.glb", attrs)))
 	wc := make(chan *WorkUnit)
 	ec := make(chan error, 1)
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 	go c.Consume(wc, ec, wg)
 
-	pts := []model.Point{
-		{X: 0, Y: 0, Z: 0, R: 160, G: 166, B: 203, Intensity: 7, Classification: 3},
-		{X: 1, Y: 1, Z: 1, R: 186, G: 200, B: 237, Intensity: 7, Classification: 3},
-		{X: 2, Y: 2, Z: 2, R: 156, G: 167, B: 204, Intensity: 7, Classification: 3},
-	}
+	pts := withDefaultPointAttributes(attrs, 7, 3, []model.Point{
+		{X: 0, Y: 0, Z: 0, R: 160, G: 166, B: 203},
+		{X: 1, Y: 1, Z: 1, R: 186, G: 200, B: 237},
+		{X: 2, Y: 2, Z: 2, R: 156, G: 167, B: 204},
+	})
 
 	pt1 := &geom.LinkedPoint{
 		Pt: pts[0],
@@ -168,6 +171,7 @@ func TestConsumeGltf(t *testing.T) {
 		Leaf:      true,
 		GeomError: 20,
 		Transform: &tr,
+		Summaries: makeStandardSummaries(attrs),
 	}
 
 	tmp, err := os.MkdirTemp(os.TempDir(), "tst")
@@ -209,4 +213,22 @@ func TestConsumeGltf(t *testing.T) {
 	if !reflect.DeepEqual(actualGlb, expectedGlb) {
 		t.Errorf("expected glb:\n%v\n\ngot:\n\n%v\n", expectedGlb, actualGlb)
 	}
+}
+
+func withDefaultPointAttributes(attrs model.Attributes, intensity uint16, classification uint8, points []model.Point) []model.Point {
+	summaries := makeStandardSummaries(attrs)
+	out := make([]model.Point, len(points))
+	for i, pt := range points {
+		out[i] = pt
+		values := packSummaryValues(summaries, map[string]any{
+			model.AttrIntensity:       intensity,
+			model.AttrClassification:  classification,
+			model.AttrReturnNumber:    uint8(0),
+			model.AttrNumberOfReturns: uint8(0),
+		})
+		if len(values) > 0 {
+			out[i].Attributes = values
+		}
+	}
+	return out
 }

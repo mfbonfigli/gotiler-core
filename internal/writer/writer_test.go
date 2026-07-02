@@ -42,13 +42,13 @@ func (w *captureWriteCloser) Close() error {
 
 func TestWriter(t *testing.T) {
 	pt1 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(1, 2, 3, 4, 5, 6, 7, 8),
+		Pt: geom.NewPoint(1, 2, 3, 4, 5, 6),
 	}
 	pt2 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(9, 10, 11, 12, 13, 14, 15, 16),
+		Pt: geom.NewPoint(9, 10, 11, 12, 13, 14),
 	}
 	pt3 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(17, 18, 19, 20, 21, 22, 23, 24),
+		Pt: geom.NewPoint(17, 18, 19, 20, 21, 22),
 	}
 	pt1.Next = pt2
 	pt2.Next = pt3
@@ -108,7 +108,7 @@ func TestWriter(t *testing.T) {
 
 func TestWriterWithCustomWriterProviderWritesTilesetAndContent(t *testing.T) {
 	pt := &geom.LinkedPoint{
-		Pt: geom.NewPoint(1, 2, 3, 4, 5, 6, 7, 8),
+		Pt: geom.NewPoint(1, 2, 3, 4, 5, 6),
 	}
 	root := &testtree.MockNode{
 		TotalNumPts: 1,
@@ -157,10 +157,10 @@ func TestWriterSquashTilesetContent(t *testing.T) {
 
 	// Create test data structure
 	pt1 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(1, 2, 3, 4, 5, 6, 7, 8),
+		Pt: geom.NewPoint(1, 2, 3, 4, 5, 6),
 	}
 	pt2 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(9, 10, 11, 12, 13, 14, 15, 16),
+		Pt: geom.NewPoint(9, 10, 11, 12, 13, 14),
 	}
 	pt1.Next = pt2
 
@@ -243,8 +243,8 @@ func TestWriterSquashTilesetContent(t *testing.T) {
 func TestWriterGECorrection(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	pt1 := &geom.LinkedPoint{Pt: geom.NewPoint(1, 2, 3, 4, 5, 6, 7, 8)}
-	pt2 := &geom.LinkedPoint{Pt: geom.NewPoint(9, 10, 11, 12, 13, 14, 15, 16)}
+	pt1 := &geom.LinkedPoint{Pt: geom.NewPoint(1, 2, 3, 4, 5, 6)}
+	pt2 := &geom.LinkedPoint{Pt: geom.NewPoint(9, 10, 11, 12, 13, 14)}
 	pt1.Next = pt2
 	stream := geom.NewLinkedPointStream(pt1, 2)
 	stream2 := geom.NewLinkedPointStream(pt2, 1)
@@ -271,13 +271,13 @@ func TestWriterGECorrection(t *testing.T) {
 
 func TestWriterWithProducerError(t *testing.T) {
 	pt1 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(1, 2, 3, 4, 5, 6, 7, 8),
+		Pt: geom.NewPoint(1, 2, 3, 4, 5, 6),
 	}
 	pt2 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(9, 10, 11, 12, 13, 14, 15, 16),
+		Pt: geom.NewPoint(9, 10, 11, 12, 13, 14),
 	}
 	pt3 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(17, 18, 19, 20, 21, 22, 23, 24),
+		Pt: geom.NewPoint(17, 18, 19, 20, 21, 22),
 	}
 	pt1.Next = pt2
 	pt2.Next = pt3
@@ -337,13 +337,13 @@ func TestWriterWithProducerError(t *testing.T) {
 
 func TestWriterWithConsumerError(t *testing.T) {
 	pt1 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(1, 2, 3, 4, 5, 6, 7, 8),
+		Pt: geom.NewPoint(1, 2, 3, 4, 5, 6),
 	}
 	pt2 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(9, 10, 11, 12, 13, 14, 15, 16),
+		Pt: geom.NewPoint(9, 10, 11, 12, 13, 14),
 	}
 	pt3 := &geom.LinkedPoint{
-		Pt: geom.NewPoint(17, 18, 19, 20, 21, 22, 23, 24),
+		Pt: geom.NewPoint(17, 18, 19, 20, 21, 22),
 	}
 	pt1.Next = pt2
 	pt2.Next = pt3

@@ -59,6 +59,8 @@ type Config struct {
 	ioFactory         IoFactory
 	writerPool        *lruWriterPool
 	rootTargetGeomErr float64 // 0 means derive from dataset bounds
+	attributes        model.Attributes
+	attrSummaries     []model.AttributeSummary
 
 	// Slice pools, used to share memory buffers between tree nodes
 	pointPool   *utils.SlicePool[model.Point] // large: maxPointsPerLeaf*2, used in processNode for child points + ADD losers
@@ -186,6 +188,13 @@ func WithRootTargetGeomErr(ge float64) func(*Node) {
 	}
 }
 
+// WithAttributes sets the ordered generic attribute requests stored by the tree.
+func WithAttributes(attrs model.Attributes) func(*Node) {
+	return func(t *Node) {
+		t.config.attributes = attrs
+	}
+}
+
 // NewNode istantiates a new non-root node from the given config. To create a tree root node use NewTree instead.
 func NewNode(t *model.Transform, config *Config) *Node {
 	return &Node{
@@ -274,13 +283,26 @@ func (n *Node) RefineMode() model.RefineMode {
 	return model.RefineReplace
 }
 
+func (n *Node) AttributeSummaries() []model.AttributeSummary {
+	if n.config == nil || len(n.config.attrSummaries) == 0 {
+		return nil
+	}
+	out := make([]model.AttributeSummary, len(n.config.attrSummaries))
+	copy(out, n.config.attrSummaries)
+	return out
+}
+
 func (n *Node) Load(r pointcloud.Reader, cf coor.ConverterFactory, mut mutator.Mutator, ctx context.Context, reporter tree.ProgressReporter) error {
-	loader := NewReservoirLoader(cf, mut, n.config.reservoirSize, n.config.numWorkers, n.config.tmpFolder, n.config.ioFactory)
+	loader := NewReservoirLoader(cf, mut, n.config.reservoirSize, n.config.numWorkers, n.config.tmpFolder, n.config.ioFactory, n.config.attributes)
 	res, err := loader.Run(r, ctx, reporter)
 	if err != nil {
 		return err
 	}
 	n.localToGlobal = &res.localToGlobal
+	n.config.attrSummaries = res.attrSummaries
+	if f, ok := n.config.ioFactory.(attributeIoFactory); ok {
+		f.SetAttributeSummaries(res.attrSummaries)
+	}
 	return n.initialize(res, ctx, reporter)
 }
 

@@ -37,7 +37,7 @@ type GoTiler struct {
 type TreeProvider func(opts tree.Options, output string) tree.Tree
 
 type writerProvider func(folder string, opts *TilerOptions) (writer.Writer, error)
-type pointcloudReaderProvider func(inputFiles []string, sourceCRS string, eightbit bool) (pointcloud.Reader, error)
+type pointcloudReaderProvider func(inputFiles []string, sourceCRS string, eightbit bool, attrs model.Attributes) (pointcloud.Reader, error)
 
 // effectivePointsPerTile returns the internal points-per-tile threshold to use when building
 // the tree. In ADD refine mode, bubble-up halves the points in each tile, so the threshold is
@@ -55,6 +55,7 @@ func treeOptions(opts *TilerOptions) tree.Options {
 		PointsPerTile:         effectivePointsPerTile(opts),
 		RefineMode:            opts.refineMode,
 		InitialGeometricError: opts.initialGeometricError,
+		Attributes:            opts.attributes,
 	}
 }
 
@@ -69,6 +70,7 @@ func NewGoTiler() (*GoTiler, error) {
 				kd.WithNumWorkers(opts.NumWorkers),
 				kd.WithPointsPerTile(opts.PointsPerTile),
 				kd.WithRefineMode(opts.RefineMode),
+				kd.WithAttributes(opts.Attributes),
 				kd.WithDataFolder(output),
 				kd.WithRootTargetGeomErr(opts.InitialGeometricError),
 			)
@@ -86,8 +88,8 @@ func NewGoTiler() (*GoTiler, error) {
 			}
 			return writer.NewWriter(folder, writerOpts...)
 		},
-		pointcloudReaderProvider: func(inputFiles []string, sourceCRS string, eightbit bool) (pointcloud.Reader, error) {
-			return pc.NewCombinedPointCloudReader(inputFiles, sourceCRS, eightbit)
+		pointcloudReaderProvider: func(inputFiles []string, sourceCRS string, eightbit bool, attrs model.Attributes) (pointcloud.Reader, error) {
+			return pc.NewCombinedPointCloudReader(inputFiles, sourceCRS, eightbit, attrs)
 		},
 	}, nil
 }
@@ -166,7 +168,7 @@ func (t *GoTiler) processFiles(inputFiles []string, outputFolder string, sourceC
 		})
 		return err
 	}
-	pointcloudFile, err := t.pointcloudReaderProvider(inputFiles, sourceCRS, opts.eightBitColors)
+	pointcloudFile, err := t.pointcloudReaderProvider(inputFiles, sourceCRS, opts.eightBitColors, opts.attributes)
 	if err != nil {
 		tree.ReportProgress(reporter, tree.ProgressUpdate{
 			Phase:       "preparation",

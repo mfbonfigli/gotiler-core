@@ -45,9 +45,9 @@ func TestParseAttributes(t *testing.T) {
 			missing: []string{AttrIntensity, AttrClassification, AttrReturnNumber, AttrNumberOfReturns},
 		},
 		{
-			name:    "unknown attribute returns error",
-			input:   []string{"bogus"},
-			wantErr: true,
+			name:  "arbitrary generic attribute is accepted",
+			input: []string{"bogus"},
+			has:   []string{"bogus"},
 		},
 	}
 

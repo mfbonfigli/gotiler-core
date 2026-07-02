@@ -58,6 +58,7 @@ The public API is intentionally small and centered on the `tiler` package:
 | `tiler/pointcloud` | Public point-cloud reader interface |
 | `tiler/plugin` | Registries and hooks |
 | `tiler/tree` | Public tree interfaces |
+| `tiler/encoding` | Shared helpers for tile encoders: attribute column resolution, output naming, per-format type mappings |
 | `version` | Tileset version constants and parsing |
 
 ## 🛠️ Usage
@@ -192,22 +193,41 @@ opts := tiler.NewTilerOptions(
 
 ### Attributes
 
+Any per-point attribute exposed by the input files can be requested by name,
+matched case-insensitively and ignoring whitespace:
+
 ```go
 import "github.com/mfbonfigli/gotiler-core/tiler/model"
 
 opts := tiler.NewTilerOptions(
-	tiler.WithAttributes(model.NewAttributes(model.AttrIntensity)),
+	tiler.WithAttributes(model.NewAttributes(
+		model.AttrIntensity,
+		"gps_time",
+		"my_custom_field", // e.g. a LAS extra-byte attribute
+	)),
 )
 ```
 
-Supported optional attributes are:
+Constants exist for the standard names: `model.AttrIntensity`,
+`model.AttrClassification`, `model.AttrReturnNumber`,
+`model.AttrNumberOfReturns`. The LAS/LAZ reader additionally exposes the other
+standard point record fields (`gps_time`, `scan_angle`, `point_source_id`,
+`user_data`, the classification flag bits, `nir`, ...) and every extra-byte
+attribute declared in the file, including common vendor spellings (e.g.
+requesting `incidence_angle` matches OPALS `_IncidenceAngle` or GeoCue
+`True View Incidence Angle`). Extra bytes declared with a scale and/or offset
+are exported as `float64` physical values (`raw*scale+offset`).
 
-| Attribute | Constant |
-|-----------|----------|
-| `intensity` | `model.AttrIntensity` |
-| `classification` | `model.AttrClassification` |
-| `return_number` | `model.AttrReturnNumber` |
-| `number_of_returns` | `model.AttrNumberOfReturns` |
+Notes:
+
+- Attributes requested but not found in the source (or missing from some
+  points) are skipped silently.
+- Attribute data types not representable by the selected encoder are omitted
+  from that output: 64-bit integers fit neither format, and the GLB encoder
+  stores `float64` values (e.g. `gps_time`) as lossy `float32` and drops
+  32-bit integers. The PNTS encoder preserves `float64` exactly.
+- Attribute names appear uppercased in the output tiles (e.g. `INTENSITY`,
+  `GPS_TIME`).
 
 Use an empty attribute set to omit optional attributes:
 
@@ -238,6 +258,10 @@ opts := tiler.NewTilerOptions(
 
 ### Custom Mutator
 
+Mutators receive the point in local coordinates plus the reader-provided
+attributes of the point, and return the (possibly modified) point, the
+attributes to store, and whether to keep the point:
+
 ```go
 type ClassificationFilter struct {
 	Keep uint8
@@ -245,13 +269,23 @@ type ClassificationFilter struct {
 
 func (f ClassificationFilter) Mutate(
 	pt model.Point,
+	attrs []model.Attribute,
 	localToGlobal model.Transform,
-) (model.Point, bool) {
-	return pt, pt.Classification == f.Keep
+) (model.Point, []model.Attribute, bool) {
+	for _, a := range attrs {
+		if a.Name == model.AttrClassification {
+			if v, ok := a.Value.(uint8); ok {
+				return pt, attrs, v == f.Keep
+			}
+		}
+	}
+	return pt, attrs, true
 }
 ```
 
-Then pass it through `WithMutators`.
+Then pass it through `WithMutators`. Note that mutators only see attributes
+that were requested via `WithAttributes`: the filter above requires
+`classification` to be part of the requested set.
 
 ## Progress Reporting
 

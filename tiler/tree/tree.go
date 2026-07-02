@@ -16,6 +16,7 @@ type Options struct {
 	PointsPerTile         int
 	RefineMode            model.RefineMode
 	InitialGeometricError float64
+	Attributes            model.Attributes
 }
 
 // Provider creates a Tree for one tiling run.
@@ -42,4 +43,10 @@ type Node interface {
 	GeometricError() float64
 	ToParentCRS() *model.Transform
 	RefineMode() model.RefineMode
+}
+
+// AttributeSummaryProvider is implemented by trees or nodes that carry
+// resolved generic attribute metadata for encoders.
+type AttributeSummaryProvider interface {
+	AttributeSummaries() []model.AttributeSummary
 }
