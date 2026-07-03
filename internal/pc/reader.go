@@ -3,6 +3,7 @@ package pc
 import (
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 
 	"github.com/mfbonfigli/gotiler-core/tiler/geom"
@@ -11,6 +12,14 @@ import (
 	"github.com/mfbonfigli/gotiler-core/tiler/pointcloud"
 )
 
+// attrRemapEntry copies one attribute value from a sub-reader's packed layout
+// to the combined layout.
+type attrRemapEntry struct {
+	srcOff int
+	dstOff int
+	size   int
+}
+
 // CombinedPointCloudReader enables reading a a list of files as if they were a single one
 // the files MUST have the same properties (SRID, etc)
 type CombinedPointCloudReader struct {
@@ -18,6 +27,13 @@ type CombinedPointCloudReader struct {
 	readers       []pointcloud.Reader
 	numPts        int
 	crs           string
+	schema        []model.AttributeDescriptor
+	schemaSize    int
+	// remaps[i] translates reader i's packed values to the combined schema
+	// layout; nil when reader i's schema already matches (the common case).
+	remaps  [][]attrRemapEntry
+	remapMu sync.Mutex
+	arena   model.AttributeValuesArena
 }
 
 // NewCombinedPointCloudReader creates a new file reader for the files passed as input. If crs is the empty string, the
@@ -52,7 +68,70 @@ func NewCombinedPointCloudReader(files []string, crs string, eightBitColor bool,
 		return nil, fmt.Errorf("no supported point cloud files found; registered extensions: %v", plugin.SupportedPointCloudExtensions())
 	}
 	r.crs = crs
+	if err := r.buildAttributeRemaps(); err != nil {
+		return nil, err
+	}
 	return r, nil
+}
+
+// buildAttributeRemaps adopts the first reader's schema as the combined schema
+// and precomputes, for every other reader, how its packed values map onto it.
+// Attributes a file does not carry are left as zero values for its points; a
+// same-name attribute with a different type across files is an error.
+func (m *CombinedPointCloudReader) buildAttributeRemaps() error {
+	m.schema = m.readers[0].AttributeSchema()
+	combined, size, err := model.AttributeSchemaLayout(m.schema)
+	if err != nil {
+		return err
+	}
+	m.schemaSize = size
+	m.remaps = make([][]attrRemapEntry, len(m.readers))
+	for i, reader := range m.readers {
+		sub := reader.AttributeSchema()
+		if schemasEqual(m.schema, sub) {
+			continue // passthrough
+		}
+		subLayout, _, err := model.AttributeSchemaLayout(sub)
+		if err != nil {
+			return err
+		}
+		byName := make(map[string]model.AttributeLayoutEntry, len(subLayout))
+		for _, e := range subLayout {
+			byName[e.Name] = e
+		}
+		remap := []attrRemapEntry{} // non-nil marks "needs remapping" even when empty
+		for _, dst := range combined {
+			src, ok := byName[dst.Name]
+			if !ok {
+				continue // attribute absent from this file: stays zero
+			}
+			if src.Type != dst.Type {
+				return fmt.Errorf("attribute %q has type %q in one input file and %q in another", dst.Name, src.Type, dst.Type)
+			}
+			remap = append(remap, attrRemapEntry{srcOff: src.Offset, dstOff: dst.Offset, size: dst.Size})
+		}
+		m.remaps[i] = remap
+	}
+	return nil
+}
+
+func schemasEqual(a, b []model.AttributeDescriptor) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// AttributeSchema implements pointcloud.Reader. The combined schema is the
+// first file's schema; points from files lacking one of its attributes carry
+// zero values for it.
+func (m *CombinedPointCloudReader) AttributeSchema() []model.AttributeDescriptor {
+	return m.schema
 }
 
 func (m *CombinedPointCloudReader) NumberOfPoints() int {
@@ -74,6 +153,17 @@ func (m *CombinedPointCloudReader) GetNext() (geom.Point64, error) {
 			// try to move on to the next reader
 			m.currentReader.CompareAndSwap(int32(currReader), int32(currReader)+1)
 			continue
+		}
+		if remap := m.remaps[currReader]; remap != nil {
+			// This file's schema differs from the combined one: rewrite the
+			// packed values into the combined layout (rare path).
+			m.remapMu.Lock()
+			blob := m.arena.Alloc(m.schemaSize)
+			m.remapMu.Unlock()
+			for _, e := range remap {
+				copy(blob[e.dstOff:e.dstOff+e.size], pt.Attributes[e.srcOff:e.srcOff+e.size])
+			}
+			pt.Attributes = blob
 		}
 		return pt, nil
 	}

@@ -13,7 +13,7 @@ func NewZOffset(offset float32) *ZOffset {
 	}
 }
 
-func (z *ZOffset) Mutate(pt model.Point, attrs []model.Attribute, localToGlobal model.Transform) (model.Point, []model.Attribute, bool) {
+func (z *ZOffset) Mutate(pt model.Point, attrs model.AttributeView, localToGlobal model.Transform) (model.Point, bool) {
 	pt.Z += z.Offset
-	return pt, attrs, true
+	return pt, true
 }

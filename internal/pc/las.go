@@ -1,7 +1,9 @@
 package pc
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
 	"sync"
 
 	"github.com/mfbonfigli/golaz"
@@ -34,6 +36,9 @@ type lasExtraAttr struct {
 	scaled bool
 	scale  float64
 	offset float64
+	// packed layout position within the point's AttributeValues
+	blobOff  int
+	blobSize int
 }
 
 // Known vendor spellings (canonical form) of extra-byte fields carrying the
@@ -68,8 +73,10 @@ type GoLasReader struct {
 	eightBitColor bool
 	crs           string
 	requested     map[string]string // source canonical name -> requested canonical name
-	emit          lasStdEmitPlan    // requested standard fields, resolved at construction
-	extraAttrs    []lasExtraAttr    // requested extra-byte attributes, resolved at construction
+	schema        []model.AttributeDescriptor
+	plan          lasEncodePlan  // byte offsets of requested standard fields, resolved at construction
+	extraAttrs    []lasExtraAttr // requested extra-byte attributes, resolved at construction
+	arena         model.AttributeValuesArena
 	mu            sync.Mutex
 	scanBuf       golaz.Point
 }
@@ -96,10 +103,15 @@ func NewGoLasReader(fileName string, crs string, eightBitColor bool, attrs model
 	}
 	if len(attrs) > 0 {
 		f.requested = buildRequestedMap(attrs)
-		f.emit = buildStdEmitPlan(f.requested)
 		f.extraAttrs = f.buildExtraAttrPlan()
+		f.buildSchema()
 	}
 	return f, nil
+}
+
+// AttributeSchema implements pointcloud.Reader.
+func (f *GoLasReader) AttributeSchema() []model.AttributeDescriptor {
+	return f.schema
 }
 
 func (f *GoLasReader) NumberOfPoints() int {
@@ -127,7 +139,7 @@ func (f *GoLasReader) GetNext() (geom.Point64, error) {
 	}
 	x, y, z := f.scanBuf.X, f.scanBuf.Y, f.scanBuf.Z
 	red, green, blue, _ := f.scanBuf.RGB()
-	attrs := f.attributesForPointLocked()
+	attrs := f.encodeAttributesLocked()
 	f.mu.Unlock()
 
 	var corr uint16 = 256
@@ -214,179 +226,261 @@ func (f *GoLasReader) buildExtraAttrPlan() []lasExtraAttr {
 	return plan
 }
 
-// lasStdEmitPlan records which standard LAS point fields were requested. It is
-// resolved once at construction so the per-point path does no map lookups:
-// attributesForPointLocked runs on the (serial) producer goroutine while the
-// reader mutex is held, so per-point work here directly stretches the reading
-// phase's wall time. Standard fields have no aliases, so the emitted name is
-// always the canonical source name itself.
-type lasStdEmitPlan struct {
-	intensity                   bool
-	classification              bool
-	returnNumber                bool
-	numberOfReturns             bool
-	scanDirectionFlag           bool
-	edgeOfFlightLine            bool
-	classificationFlags         bool
-	synthetic                   bool
-	keyPoint                    bool
-	withheld                    bool
-	overlap                     bool
-	userData                    bool
-	pointSourceID               bool
-	scanAngle                   bool
-	gpsTime                     bool
-	nir                         bool
-	scannerChannel              bool
-	wavePacketDescriptorIndex   bool
-	waveformDataOffset          bool
-	waveformPacketSize          bool
-	returnPointWaveformLocation bool
-	waveDirection               bool
+// lasEncodePlan holds the packed-value byte offset of every requested
+// standard LAS point field, or -1 when the field is not part of the schema
+// (not requested, or not carried by the file's point format). It is resolved
+// once at construction so the per-point path is straight-line binary encoding:
+// encodeAttributesLocked runs on the serial producer goroutine while the
+// reader mutex is held, so per-point work there directly stretches the reading
+// phase's wall time.
+type lasEncodePlan struct {
+	size                        int
+	intensity                   int
+	classification              int
+	returnNumber                int
+	numberOfReturns             int
+	scanDirectionFlag           int
+	edgeOfFlightLine            int
+	classificationFlags         int
+	synthetic                   int
+	keyPoint                    int
+	withheld                    int
+	overlap                     int
+	userData                    int
+	pointSourceID               int
+	scanAngle                   int
+	gpsTime                     int
+	nir                         int
+	scannerChannel              int
+	wavePacketDescriptorIndex   int
+	waveformDataOffset          int
+	waveformPacketSize          int
+	returnPointWaveformLocation int
+	waveformXT                  int
+	waveformYT                  int
+	waveformZT                  int
 }
 
-func buildStdEmitPlan(requested map[string]string) lasStdEmitPlan {
-	has := func(name string) bool {
-		_, ok := requested[name]
-		return ok
-	}
-	return lasStdEmitPlan{
-		intensity:                   has(model.AttrIntensity),
-		classification:              has(model.AttrClassification),
-		returnNumber:                has(model.AttrReturnNumber),
-		numberOfReturns:             has(model.AttrNumberOfReturns),
-		scanDirectionFlag:           has("scan_direction_flag"),
-		edgeOfFlightLine:            has("edge_of_flight_line"),
-		classificationFlags:         has("classification_flags"),
-		synthetic:                   has("synthetic"),
-		keyPoint:                    has("key_point"),
-		withheld:                    has("withheld"),
-		overlap:                     has("overlap"),
-		userData:                    has("user_data"),
-		pointSourceID:               has("point_source_id"),
-		scanAngle:                   has("scan_angle"),
-		gpsTime:                     has("gps_time"),
-		nir:                         has("nir"),
-		scannerChannel:              has("scanner_channel"),
-		wavePacketDescriptorIndex:   has("wave_packet_descriptor_index"),
-		waveformDataOffset:          has("waveform_data_offset"),
-		waveformPacketSize:          has("waveform_packet_size"),
-		returnPointWaveformLocation: has("return_point_waveform_location"),
-		waveDirection:               has("waveform_x_t") || has("waveform_y_t") || has("waveform_z_t"),
+// lasFormatCaps reports which optional field groups a LAS point data format
+// carries, mirroring the LAS 1.4 specification (and golaz's decode table).
+func lasFormatCaps(pf uint8) (gps, color, nir, wave, extended bool) {
+	switch pf {
+	case 1:
+		return true, false, false, false, false
+	case 2:
+		return false, true, false, false, false
+	case 3:
+		return true, true, false, false, false
+	case 4:
+		return true, false, false, true, false
+	case 5:
+		return true, true, false, true, false
+	case 6:
+		return true, false, false, false, true
+	case 7:
+		return true, true, false, false, true
+	case 8:
+		return true, true, true, false, true
+	case 9:
+		return true, false, false, true, true
+	case 10:
+		return true, true, true, true, true
+	default:
+		return false, false, false, false, false
 	}
 }
 
-func (f *GoLasReader) attributesForPointLocked() []model.Attribute {
-	if len(f.requested) == 0 {
+// buildSchema resolves the reader's attribute schema and packed layout:
+// requested standard fields the point format carries (in a fixed emission
+// order), followed by the requested extra-byte attributes. Must run after
+// buildExtraAttrPlan.
+func (f *GoLasReader) buildSchema() {
+	p := &f.plan
+	gps, _, nir, wave, extended := lasFormatCaps(f.r.Header().PointDataFormat)
+
+	type stdField struct {
+		name string
+		typ  model.AttributeType
+		ok   bool
+		off  *int
+	}
+	fields := []stdField{
+		{model.AttrIntensity, model.AttributeUint16, true, &p.intensity},
+		{model.AttrClassification, model.AttributeUint8, true, &p.classification},
+		{model.AttrReturnNumber, model.AttributeUint8, true, &p.returnNumber},
+		{model.AttrNumberOfReturns, model.AttributeUint8, true, &p.numberOfReturns},
+		{"scan_direction_flag", model.AttributeBool, true, &p.scanDirectionFlag},
+		{"edge_of_flight_line", model.AttributeBool, true, &p.edgeOfFlightLine},
+		{"classification_flags", model.AttributeUint8, true, &p.classificationFlags},
+		{"synthetic", model.AttributeBool, true, &p.synthetic},
+		{"key_point", model.AttributeBool, true, &p.keyPoint},
+		{"withheld", model.AttributeBool, true, &p.withheld},
+		{"overlap", model.AttributeBool, true, &p.overlap},
+		{"user_data", model.AttributeUint8, true, &p.userData},
+		{"point_source_id", model.AttributeUint16, true, &p.pointSourceID},
+		{"scan_angle", model.AttributeFloat64, true, &p.scanAngle},
+		{"gps_time", model.AttributeFloat64, gps, &p.gpsTime},
+		{"nir", model.AttributeUint16, nir, &p.nir},
+		{"scanner_channel", model.AttributeUint8, extended, &p.scannerChannel},
+		{"wave_packet_descriptor_index", model.AttributeUint8, wave, &p.wavePacketDescriptorIndex},
+		{"waveform_data_offset", model.AttributeUint64, wave, &p.waveformDataOffset},
+		{"waveform_packet_size", model.AttributeUint32, wave, &p.waveformPacketSize},
+		{"return_point_waveform_location", model.AttributeFloat32, wave, &p.returnPointWaveformLocation},
+		{"waveform_x_t", model.AttributeFloat32, wave, &p.waveformXT},
+		{"waveform_y_t", model.AttributeFloat32, wave, &p.waveformYT},
+		{"waveform_z_t", model.AttributeFloat32, wave, &p.waveformZT},
+	}
+
+	cursor := 0
+	for i := range fields {
+		fd := &fields[i]
+		*fd.off = -1
+		if !fd.ok {
+			continue
+		}
+		if _, req := f.requested[fd.name]; !req {
+			continue
+		}
+		size, _ := model.AttributeTypeSize(fd.typ)
+		f.schema = append(f.schema, model.AttributeDescriptor{Name: fd.name, Type: fd.typ})
+		*fd.off = cursor
+		cursor += size
+	}
+	for i := range f.extraAttrs {
+		ea := &f.extraAttrs[i]
+		size, _ := model.AttributeTypeSize(ea.typ)
+		f.schema = append(f.schema, model.AttributeDescriptor{Name: ea.outputName, Type: ea.typ})
+		ea.blobOff = cursor
+		ea.blobSize = size
+		cursor += size
+	}
+	p.size = cursor
+}
+
+func b2u8(v bool) byte {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+// encodeAttributesLocked encodes the requested attributes of the point in
+// scanBuf into a packed AttributeValues buffer laid out per f.schema.
+// Must be called with f.mu held.
+func (f *GoLasReader) encodeAttributesLocked() model.AttributeValues {
+	p := &f.plan
+	if p.size == 0 {
 		return nil
 	}
-	attrs := make([]model.Attribute, 0, len(f.requested))
-	e := &f.emit
-	if e.intensity {
-		attrs = append(attrs, model.Attribute{Name: model.AttrIntensity, Type: model.AttributeUint16, Value: f.scanBuf.Intensity})
+	blob := f.arena.Alloc(p.size)
+	if p.intensity >= 0 {
+		binary.LittleEndian.PutUint16(blob[p.intensity:], f.scanBuf.Intensity)
 	}
-	if e.classification {
-		attrs = append(attrs, model.Attribute{Name: model.AttrClassification, Type: model.AttributeUint8, Value: f.scanBuf.Classification})
+	if p.classification >= 0 {
+		blob[p.classification] = f.scanBuf.Classification
 	}
-	if e.returnNumber {
-		attrs = append(attrs, model.Attribute{Name: model.AttrReturnNumber, Type: model.AttributeUint8, Value: f.scanBuf.ReturnNumber})
+	if p.returnNumber >= 0 {
+		blob[p.returnNumber] = f.scanBuf.ReturnNumber
 	}
-	if e.numberOfReturns {
-		attrs = append(attrs, model.Attribute{Name: model.AttrNumberOfReturns, Type: model.AttributeUint8, Value: f.scanBuf.NumberOfReturns})
+	if p.numberOfReturns >= 0 {
+		blob[p.numberOfReturns] = f.scanBuf.NumberOfReturns
 	}
-	if e.scanDirectionFlag {
-		attrs = append(attrs, model.Attribute{Name: "scan_direction_flag", Type: model.AttributeBool, Value: f.scanBuf.ScanDirectionFlag})
+	if p.scanDirectionFlag >= 0 {
+		blob[p.scanDirectionFlag] = b2u8(f.scanBuf.ScanDirectionFlag)
 	}
-	if e.edgeOfFlightLine {
-		attrs = append(attrs, model.Attribute{Name: "edge_of_flight_line", Type: model.AttributeBool, Value: f.scanBuf.EdgeOfFlightLine})
+	if p.edgeOfFlightLine >= 0 {
+		blob[p.edgeOfFlightLine] = b2u8(f.scanBuf.EdgeOfFlightLine)
 	}
-	if e.classificationFlags {
-		attrs = append(attrs, model.Attribute{Name: "classification_flags", Type: model.AttributeUint8, Value: f.scanBuf.ClassificationFlags})
+	if p.classificationFlags >= 0 {
+		blob[p.classificationFlags] = f.scanBuf.ClassificationFlags
 	}
-	if e.synthetic {
-		attrs = append(attrs, model.Attribute{Name: "synthetic", Type: model.AttributeBool, Value: f.scanBuf.ClassificationFlags&1 != 0})
+	if p.synthetic >= 0 {
+		blob[p.synthetic] = f.scanBuf.ClassificationFlags & 1
 	}
-	if e.keyPoint {
-		attrs = append(attrs, model.Attribute{Name: "key_point", Type: model.AttributeBool, Value: f.scanBuf.ClassificationFlags&2 != 0})
+	if p.keyPoint >= 0 {
+		blob[p.keyPoint] = (f.scanBuf.ClassificationFlags >> 1) & 1
 	}
-	if e.withheld {
-		attrs = append(attrs, model.Attribute{Name: "withheld", Type: model.AttributeBool, Value: f.scanBuf.ClassificationFlags&4 != 0})
+	if p.withheld >= 0 {
+		blob[p.withheld] = (f.scanBuf.ClassificationFlags >> 2) & 1
 	}
-	if e.overlap {
-		attrs = append(attrs, model.Attribute{Name: "overlap", Type: model.AttributeBool, Value: f.scanBuf.ClassificationFlags&8 != 0})
+	if p.overlap >= 0 {
+		blob[p.overlap] = (f.scanBuf.ClassificationFlags >> 3) & 1
 	}
-	if e.userData {
-		attrs = append(attrs, model.Attribute{Name: "user_data", Type: model.AttributeUint8, Value: f.scanBuf.UserData})
+	if p.userData >= 0 {
+		blob[p.userData] = f.scanBuf.UserData
 	}
-	if e.pointSourceID {
-		attrs = append(attrs, model.Attribute{Name: "point_source_id", Type: model.AttributeUint16, Value: f.scanBuf.PointSourceID})
+	if p.pointSourceID >= 0 {
+		binary.LittleEndian.PutUint16(blob[p.pointSourceID:], f.scanBuf.PointSourceID)
 	}
-	if e.scanAngle {
-		attrs = append(attrs, model.Attribute{Name: "scan_angle", Type: model.AttributeFloat64, Value: f.scanBuf.ScanAngleDegrees})
+	if p.scanAngle >= 0 {
+		binary.LittleEndian.PutUint64(blob[p.scanAngle:], math.Float64bits(f.scanBuf.ScanAngleDegrees))
 	}
-	if e.gpsTime {
-		if gpsTime, ok := f.scanBuf.GPSTime(); ok {
-			attrs = append(attrs, model.Attribute{Name: "gps_time", Type: model.AttributeFloat64, Value: gpsTime})
+	if p.gpsTime >= 0 {
+		if v, ok := f.scanBuf.GPSTime(); ok {
+			binary.LittleEndian.PutUint64(blob[p.gpsTime:], math.Float64bits(v))
 		}
 	}
-	if e.nir {
-		if nir, ok := f.scanBuf.NIR(); ok {
-			attrs = append(attrs, model.Attribute{Name: "nir", Type: model.AttributeUint16, Value: nir})
+	if p.nir >= 0 {
+		if v, ok := f.scanBuf.NIR(); ok {
+			binary.LittleEndian.PutUint16(blob[p.nir:], v)
 		}
 	}
-	if e.scannerChannel {
-		if scannerChannel, ok := f.scanBuf.ScannerChannel(); ok {
-			attrs = append(attrs, model.Attribute{Name: "scanner_channel", Type: model.AttributeUint8, Value: scannerChannel})
+	if p.scannerChannel >= 0 {
+		if v, ok := f.scanBuf.ScannerChannel(); ok {
+			blob[p.scannerChannel] = v
 		}
 	}
-	if e.wavePacketDescriptorIndex {
-		if waveIdx, ok := f.scanBuf.WavePacketDescriptorIndex(); ok {
-			attrs = append(attrs, model.Attribute{Name: "wave_packet_descriptor_index", Type: model.AttributeUint8, Value: waveIdx})
+	if p.wavePacketDescriptorIndex >= 0 {
+		if v, ok := f.scanBuf.WavePacketDescriptorIndex(); ok {
+			blob[p.wavePacketDescriptorIndex] = v
 		}
 	}
-	if e.waveformDataOffset {
-		if waveOffset, ok := f.scanBuf.WaveformDataOffset(); ok {
-			attrs = append(attrs, model.Attribute{Name: "waveform_data_offset", Type: model.AttributeUint64, Value: waveOffset})
+	if p.waveformDataOffset >= 0 {
+		if v, ok := f.scanBuf.WaveformDataOffset(); ok {
+			binary.LittleEndian.PutUint64(blob[p.waveformDataOffset:], v)
 		}
 	}
-	if e.waveformPacketSize {
-		if waveSize, ok := f.scanBuf.WaveformPacketSize(); ok {
-			attrs = append(attrs, model.Attribute{Name: "waveform_packet_size", Type: model.AttributeUint32, Value: waveSize})
+	if p.waveformPacketSize >= 0 {
+		if v, ok := f.scanBuf.WaveformPacketSize(); ok {
+			binary.LittleEndian.PutUint32(blob[p.waveformPacketSize:], v)
 		}
 	}
-	if e.returnPointWaveformLocation {
-		if waveLoc, ok := f.scanBuf.ReturnPointWaveformLocation(); ok {
-			attrs = append(attrs, model.Attribute{Name: "return_point_waveform_location", Type: model.AttributeFloat32, Value: waveLoc})
+	if p.returnPointWaveformLocation >= 0 {
+		if v, ok := f.scanBuf.ReturnPointWaveformLocation(); ok {
+			binary.LittleEndian.PutUint32(blob[p.returnPointWaveformLocation:], math.Float32bits(v))
 		}
 	}
-	if e.waveDirection {
-		if waveX, waveY, waveZ, ok := f.scanBuf.WaveDirection(); ok {
-			if _, ok := f.requested["waveform_x_t"]; ok {
-				attrs = append(attrs, model.Attribute{Name: "waveform_x_t", Type: model.AttributeFloat32, Value: waveX})
+	if p.waveformXT >= 0 || p.waveformYT >= 0 || p.waveformZT >= 0 {
+		if x, y, z, ok := f.scanBuf.WaveDirection(); ok {
+			if p.waveformXT >= 0 {
+				binary.LittleEndian.PutUint32(blob[p.waveformXT:], math.Float32bits(x))
 			}
-			if _, ok := f.requested["waveform_y_t"]; ok {
-				attrs = append(attrs, model.Attribute{Name: "waveform_y_t", Type: model.AttributeFloat32, Value: waveY})
+			if p.waveformYT >= 0 {
+				binary.LittleEndian.PutUint32(blob[p.waveformYT:], math.Float32bits(y))
 			}
-			if _, ok := f.requested["waveform_z_t"]; ok {
-				attrs = append(attrs, model.Attribute{Name: "waveform_z_t", Type: model.AttributeFloat32, Value: waveZ})
+			if p.waveformZT >= 0 {
+				binary.LittleEndian.PutUint32(blob[p.waveformZT:], math.Float32bits(z))
 			}
 		}
 	}
-	for _, ea := range f.extraAttrs {
+	for i := range f.extraAttrs {
+		ea := &f.extraAttrs[i]
 		value, err := f.r.ExtraByte(&f.scanBuf, ea.descName)
 		if err != nil {
-			continue
+			continue // leave zeros
 		}
 		if ea.scaled {
 			raw, ok := extraByteAsFloat64(value)
 			if !ok {
 				continue
 			}
-			value = raw*ea.scale + ea.offset
+			binary.LittleEndian.PutUint64(blob[ea.blobOff:], math.Float64bits(raw*ea.scale+ea.offset))
+			continue
 		}
-		attrs = append(attrs, model.Attribute{Name: ea.outputName, Type: ea.typ, Value: value})
+		// golaz boxes the extra-byte scalar; decode it via the generic encoder.
+		_ = model.EncodeAttributeValue(blob[ea.blobOff:ea.blobOff+ea.blobSize], ea.typ, value)
 	}
-	return attrs
+	return blob
 }
 
 // extraByteAsFloat64 converts a raw extra-byte scalar (any of the ten LAS 1.4

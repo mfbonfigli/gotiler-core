@@ -30,14 +30,6 @@ const (
 	AttributeFloat64 AttributeType = "float64"
 )
 
-// Attribute is a reader-provided per-point attribute. Name is expected to be
-// canonicalized by the reader after applying any reader-specific aliases.
-type Attribute struct {
-	Name  string
-	Type  AttributeType
-	Value any
-}
-
 // AttributeSummary describes one requested attribute that the tree stored.
 // SkipIncomplete is true when at least one point was missing the attribute, so
 // encoders should omit it.
@@ -145,9 +137,9 @@ type AttributeLayoutEntry struct {
 	Type   AttributeType
 	Offset int
 	Size   int
-	// SummaryIndex is the index of the originating entry in the summary list
-	// the layout was computed from.
-	SummaryIndex int
+	// SourceIndex is the index of the originating entry in the list the
+	// layout was computed from (attribute summaries or a reader schema).
+	SourceIndex int
 }
 
 // AttributeLayout computes the packed value layout for the given summaries.
@@ -161,11 +153,11 @@ func AttributeLayout(summaries []AttributeSummary) (entries []AttributeLayoutEnt
 			continue
 		}
 		entries = append(entries, AttributeLayoutEntry{
-			Name:         summary.Name,
-			Type:         summary.Type,
-			Offset:       total,
-			Size:         size,
-			SummaryIndex: i,
+			Name:        summary.Name,
+			Type:        summary.Type,
+			Offset:      total,
+			Size:        size,
+			SourceIndex: i,
 		})
 		total += size
 	}

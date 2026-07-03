@@ -40,7 +40,7 @@ func AttributeColumns(node tree.Node, supports func(model.AttributeType) bool) [
 	entries, _ := model.AttributeLayout(source)
 	var out []AttributeColumn
 	for _, e := range entries {
-		summary := source[e.SummaryIndex]
+		summary := source[e.SourceIndex]
 		if summary.SkipIncomplete || !supports(summary.Type) {
 			continue
 		}

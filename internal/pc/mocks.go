@@ -4,13 +4,20 @@ import (
 	"io"
 
 	"github.com/mfbonfigli/gotiler-core/tiler/geom"
+	"github.com/mfbonfigli/gotiler-core/tiler/model"
 )
 
 type MockLasReader struct {
 	Cur         int
 	Pts         []geom.Point64
 	CRS         string
+	Schema      []model.AttributeDescriptor
 	CloseCalled bool
+}
+
+// AttributeSchema returns the mock's declared attribute schema.
+func (m *MockLasReader) AttributeSchema() []model.AttributeDescriptor {
+	return m.Schema
 }
 
 // NumberOfPoints returns the number of points stored in the LAS file

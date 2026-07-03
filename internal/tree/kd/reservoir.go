@@ -112,22 +112,16 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 	}
 	defer c.Cleanup()
 
-	localToGlobal, firstLocalPt, firstRawAttrs, readErr := baseline(reader, c, s.mut)
-	if readErr != nil {
-		return nil, readErr
-	}
-	attrSummaries := initializeAttributeSummaries(s.attributes, firstRawAttrs)
-	packer := newAttributePacker(attrSummaries)
-	if packer.size > 0 {
-		blob := make(model.AttributeValues, packer.size)
-		if err := packer.pack(blob, firstRawAttrs); err != nil {
-			return nil, err
-		}
-		firstLocalPt.Attributes = blob
-	}
-	stats := newAttrStats(packer.entries)
+	attrSummaries := initializeAttributeSummaries(s.attributes, reader.AttributeSchema())
+	layoutEntries, layoutSize := model.AttributeLayout(attrSummaries)
+	stats := newAttrStats(layoutEntries)
 	if f, ok := s.ioFactory.(attributeIoFactory); ok {
 		f.SetAttributeSummaries(attrSummaries)
+	}
+
+	localToGlobal, firstLocalPt, readErr := baseline(reader, c, s.mut, layoutEntries, layoutSize)
+	if readErr != nil {
+		return nil, readErr
 	}
 
 	tmpFile, err := os.CreateTemp(s.tempFolder, "points_*.bin")
@@ -256,18 +250,11 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 					continue
 				}
 
-				// One shared backing array per batch: each kept point gets a
-				// sub-slice, avoiding a per-point allocation for its packed values.
-				var blobBacking []byte
-				blobCursor := 0
-				if packer.size > 0 {
-					blobBacking = make([]byte, n*packer.size)
-				}
-				packErr := false
+				attrErr := false
 				for i, rawPt := range *rawBatchPtr {
-					// Drop the reader-provided attribute references eagerly so
-					// the pooled raw batch does not keep them (and their boxed
-					// values) alive once recycled.
+					// Drop the packed-value references eagerly so the pooled
+					// raw batch does not keep reader arena blocks alive once
+					// recycled.
 					(*rawBatchPtr)[i].Attributes = nil
 					offset := i * 3
 					ecefPt := geom.Point64{
@@ -281,31 +268,29 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 						B: rawPt.B,
 					}
 					localPt := toLocalPoint(ecefPt, localToGlobal)
-					rawAttrs := rawPt.Attributes
+					// The reader's packed values match the storage layout by
+					// construction (summaries are in schema order), so they
+					// flow through without re-encoding.
+					if len(rawPt.Attributes) != layoutSize {
+						select {
+						case errCh <- fmt.Errorf("reader emitted %d attribute bytes per point, schema layout expects %d", len(rawPt.Attributes), layoutSize):
+						default:
+						}
+						cancel()
+						attrErr = true
+						break
+					}
+					localPt.Attributes = rawPt.Attributes
 					keep := true
 					if s.mut != nil {
-						localPt, rawAttrs, keep = s.mut.Mutate(localPt, rawAttrs, localToGlobal)
+						localPt, keep = s.mut.Mutate(localPt, model.NewAttributeView(layoutEntries, localPt.Attributes), localToGlobal)
 						if !keep {
 							continue
 						}
 					}
-					if packer.size > 0 {
-						blob := blobBacking[blobCursor : blobCursor+packer.size : blobCursor+packer.size]
-						blobCursor += packer.size
-						if err := packer.pack(blob, rawAttrs); err != nil {
-							select {
-							case errCh <- err:
-							default:
-							}
-							cancel()
-							packErr = true
-							break
-						}
-						localPt.Attributes = blob
-					}
 					*localBatchPtr = append(*localBatchPtr, localPt)
 				}
-				if packErr {
+				if attrErr {
 					s.flatCoordsPool.Put(flatCoordsPtr)
 					s.localBatchPool.Put(localBatchPtr)
 					s.rawBatchPool.Put(rawBatchPtr)
@@ -349,12 +334,12 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 	// attribute memory live. Copying into a slot-indexed arena bounds the
 	// retained memory to reservoirSize*attrSize with no per-point allocations.
 	var sampleBlobs []byte
-	if packer.size > 0 {
-		sampleBlobs = make([]byte, s.reservoirSize*packer.size)
+	if layoutSize > 0 {
+		sampleBlobs = make([]byte, s.reservoirSize*layoutSize)
 	}
 	adoptSample := func(pt model.Point, slot int) model.Point {
 		if len(pt.Attributes) > 0 {
-			dst := sampleBlobs[slot*packer.size : (slot+1)*packer.size : (slot+1)*packer.size]
+			dst := sampleBlobs[slot*layoutSize : (slot+1)*layoutSize : (slot+1)*layoutSize]
 			copy(dst, pt.Attributes)
 			pt.Attributes = dst
 		}
@@ -466,7 +451,6 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 		return nil, fmt.Errorf("no valid points found")
 	}
 
-	packer.applyMissing(attrSummaries)
 	stats.apply(attrSummaries)
 
 	tree.ReportProgress(reporter, tree.ProgressUpdate{
@@ -489,28 +473,31 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 }
 
 // baseline returns the local-to-global transform for the first valid point, and the point in local coords.
-func baseline(reader pointcloud.Reader, c coor.Converter, mut mutator.Mutator) (model.Transform, model.Point, []model.Attribute, error) {
+func baseline(reader pointcloud.Reader, c coor.Converter, mut mutator.Mutator, layoutEntries []model.AttributeLayoutEntry, layoutSize int) (model.Transform, model.Point, error) {
 	sourceCRS := reader.GetCRS()
 	for {
 		first, err := reader.GetNext()
 		if err != nil {
-			return model.Transform{}, model.Point{}, nil, err
+			return model.Transform{}, model.Point{}, err
+		}
+		if len(first.Attributes) != layoutSize {
+			return model.Transform{}, model.Point{}, fmt.Errorf("reader emitted %d attribute bytes per point, schema layout expects %d", len(first.Attributes), layoutSize)
 		}
 		ecefPt, err := transformToECEF(c, first, sourceCRS)
 		if err != nil {
-			return model.Transform{}, model.Point{}, nil, err
+			return model.Transform{}, model.Point{}, err
 		}
 		localToGlobal := geom.LocalToGlobalTransformFromPoint(ecefPt.X, ecefPt.Y, ecefPt.Z)
 		localPt := toLocalPoint(ecefPt, localToGlobal)
-		attrs := first.Attributes
+		localPt.Attributes = first.Attributes
 		keep := true
 		if mut != nil {
-			localPt, attrs, keep = mut.Mutate(localPt, attrs, localToGlobal)
+			localPt, keep = mut.Mutate(localPt, model.NewAttributeView(layoutEntries, localPt.Attributes), localToGlobal)
 			if !keep {
 				continue
 			}
 		}
-		return localToGlobal, localPt, attrs, nil
+		return localToGlobal, localPt, nil
 	}
 }
 

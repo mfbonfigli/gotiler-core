@@ -1,6 +1,7 @@
 package pc
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/mfbonfigli/gotiler-core/tiler/model"
@@ -111,10 +112,25 @@ func TestBuildRequestedMapAliases(t *testing.T) {
 	}
 }
 
+// embeddedLasFile materializes the named embedded fixture into a temp dir and
+// returns its path. Test binaries may run outside the package directory (the
+// cross-target CI does), so fixtures must not be opened via relative paths.
+func embeddedLasFile(t *testing.T, name string) string {
+	t.Helper()
+	files, _ := writeEmbeddedLasFiles(t)
+	for _, f := range files {
+		if filepath.Base(f) == name {
+			return f
+		}
+	}
+	t.Fatalf("embedded fixture %q not found", name)
+	return ""
+}
+
 // TestGoLasReaderEmitsRequestedAttributes reads a real LAS fixture and checks
 // that requested standard attributes are emitted with the right names/types.
 func TestGoLasReaderEmitsRequestedAttributes(t *testing.T) {
-	r, err := NewGoLasReader("testdata/las-12-pf1.las", "EPSG:32633", false,
+	r, err := NewGoLasReader(embeddedLasFile(t, "las-12-pf1.las"), "EPSG:32633", false,
 		model.NewAttributes("Intensity", "classification", "gps_time", "scan_angle", "point_source_id", "not_present_attr"))
 	if err != nil {
 		t.Fatalf("open fixture: %v", err)
@@ -132,27 +148,38 @@ func TestGoLasReaderEmitsRequestedAttributes(t *testing.T) {
 		"scan_angle":      model.AttributeFloat64,
 		"point_source_id": model.AttributeUint16,
 	}
+	schema := r.AttributeSchema()
 	got := map[string]model.AttributeType{}
-	for _, a := range pt.Attributes {
-		got[a.Name] = a.Type
-		if a.Value == nil {
-			t.Errorf("attribute %q has nil value", a.Name)
-		}
+	for _, desc := range schema {
+		got[desc.Name] = desc.Type
 	}
 	for name, typ := range want {
 		if got[name] != typ {
-			t.Errorf("attribute %q: got type %q want %q (attrs: %v)", name, got[name], typ, pt.Attributes)
+			t.Errorf("attribute %q: got type %q want %q (schema: %v)", name, got[name], typ, schema)
 		}
 	}
 	if len(got) != len(want) {
-		t.Errorf("expected %d attributes, got %d: %v", len(want), len(got), pt.Attributes)
+		t.Errorf("expected %d schema attributes, got %d: %v", len(want), len(got), schema)
+	}
+	entries, size, err := model.AttributeSchemaLayout(schema)
+	if err != nil {
+		t.Fatalf("schema layout: %v", err)
+	}
+	if len(pt.Attributes) != size {
+		t.Fatalf("packed values are %d bytes, schema layout expects %d", len(pt.Attributes), size)
+	}
+	view := model.NewAttributeView(entries, pt.Attributes)
+	for i := 0; i < view.Len(); i++ {
+		if v, err := view.Value(i); err != nil || v == nil {
+			t.Errorf("attribute %q: decode failed (%v, %v)", view.Name(i), v, err)
+		}
 	}
 }
 
 // TestGoLasReaderNoAttributesRequested ensures the reader emits nothing when
 // no attributes are requested.
 func TestGoLasReaderNoAttributesRequested(t *testing.T) {
-	r, err := NewGoLasReader("testdata/las-12-pf1.las", "EPSG:32633", false, nil)
+	r, err := NewGoLasReader(embeddedLasFile(t, "las-12-pf1.las"), "EPSG:32633", false, nil)
 	if err != nil {
 		t.Fatalf("open fixture: %v", err)
 	}

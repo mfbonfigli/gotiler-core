@@ -7,12 +7,15 @@ import (
 )
 
 // Point64 contains point-cloud point data with double-precision coordinates.
+// Attributes holds the point's optional attribute values packed according to
+// the reader's schema (see pointcloud.Reader.AttributeSchema); nil when the
+// reader emits no attributes.
 type Point64 struct {
 	model.Vector
 	R          uint8
 	G          uint8
 	B          uint8
-	Attributes []model.Attribute
+	Attributes model.AttributeValues
 }
 
 // NewPoint builds a model.Point from coordinates and standard attributes.

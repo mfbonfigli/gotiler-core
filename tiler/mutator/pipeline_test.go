@@ -10,8 +10,8 @@ import (
 
 type discardMutator struct{}
 
-func (p *discardMutator) Mutate(pt model.Point, attrs []model.Attribute, t model.Transform) (model.Point, []model.Attribute, bool) {
-	return pt, attrs, false
+func (p *discardMutator) Mutate(pt model.Point, attrs model.AttributeView, t model.Transform) (model.Point, bool) {
+	return pt, false
 }
 
 func TestPipeline(t *testing.T) {
@@ -19,7 +19,7 @@ func TestPipeline(t *testing.T) {
 		NewZOffset(1.5),
 		NewZOffset(2.5),
 	)
-	actual, _, keep := p.Mutate(geom.NewPoint(1, 2, 3, 1, 2, 3), nil, model.Transform{})
+	actual, keep := p.Mutate(geom.NewPoint(1, 2, 3, 1, 2, 3), model.AttributeView{}, model.Transform{})
 	expected := geom.NewPoint(1, 2, 7, 1, 2, 3)
 	if !reflect.DeepEqual(actual, expected) {
 		t.Errorf("expected %v, got %v", expected, actual)
@@ -35,7 +35,7 @@ func TestPipelineDiscard(t *testing.T) {
 		&discardMutator{},
 		NewZOffset(2.5),
 	)
-	actual, _, keep := p.Mutate(geom.NewPoint(1, 2, 3, 1, 2, 3), nil, model.Transform{})
+	actual, keep := p.Mutate(geom.NewPoint(1, 2, 3, 1, 2, 3), model.AttributeView{}, model.Transform{})
 	expected := geom.NewPoint(1, 2, 4.5, 1, 2, 3)
 	if !reflect.DeepEqual(actual, expected) {
 		t.Errorf("expected %v, got %v", expected, actual)

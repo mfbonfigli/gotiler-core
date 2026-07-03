@@ -280,11 +280,24 @@ func TestReservoirLoader_GenericAttributes(t *testing.T) {
 	requested := model.NewAttributes("Intensity", "amplification", "not_in_source")
 	loader := NewReservoirLoader(conv, nil, 100, 2, t.TempDir(), ioFactory, requested)
 
-	mkAttrs := func(intensity uint16, amp float32) []model.Attribute {
-		return []model.Attribute{
-			{Name: "intensity", Type: model.AttributeUint16, Value: intensity},
-			{Name: "amplification", Type: model.AttributeFloat32, Value: amp},
+	schema := []model.AttributeDescriptor{
+		{Name: "intensity", Type: model.AttributeUint16},
+		{Name: "amplification", Type: model.AttributeFloat32},
+	}
+	schemaEntries, schemaSize, err := model.AttributeSchemaLayout(schema)
+	if err != nil {
+		t.Fatalf("schema layout: %v", err)
+	}
+	mkAttrs := func(intensity uint16, amp float32) model.AttributeValues {
+		blob := make(model.AttributeValues, schemaSize)
+		v := model.NewAttributeView(schemaEntries, blob)
+		if err := v.SetValue(0, intensity); err != nil {
+			t.Fatalf("set intensity: %v", err)
 		}
+		if err := v.SetValue(1, amp); err != nil {
+			t.Fatalf("set amplification: %v", err)
+		}
+		return blob
 	}
 	type wanted struct {
 		intensity uint16
@@ -296,7 +309,8 @@ func TestReservoirLoader_GenericAttributes(t *testing.T) {
 		{9, 0.5}:  true,
 	}
 	reader := &pc.MockLasReader{
-		CRS: "EPSG:4978",
+		CRS:    "EPSG:4978",
+		Schema: schema,
 		Pts: []geom.Point64{
 			{Vector: model.Vector{X: 4399228.288985, Y: 855784.797006, Z: 0}, Attributes: mkAttrs(7, 1.5)},
 			{Vector: model.Vector{X: 4399238.288985, Y: 855784.797006, Z: 0}, Attributes: mkAttrs(3, -2.5)},
@@ -381,15 +395,15 @@ type classificationFilter struct {
 	discard uint8
 }
 
-func (m *classificationFilter) Mutate(pt model.Point, attrs []model.Attribute, t model.Transform) (model.Point, []model.Attribute, bool) {
-	for _, a := range attrs {
-		if a.Name == "classification" {
-			if v, ok := a.Value.(uint8); ok && v == m.discard {
-				return pt, attrs, false
+func (m *classificationFilter) Mutate(pt model.Point, attrs model.AttributeView, t model.Transform) (model.Point, bool) {
+	if i := attrs.Index("classification"); i >= 0 {
+		if v, err := attrs.Value(i); err == nil {
+			if c, ok := v.(uint8); ok && c == m.discard {
+				return pt, false
 			}
 		}
 	}
-	return pt, attrs, true
+	return pt, true
 }
 
 // TestReservoirLoader_AttributeAwareMutator verifies that mutators receive the
@@ -400,11 +414,12 @@ func TestReservoirLoader_AttributeAwareMutator(t *testing.T) {
 	requested := model.NewAttributes("classification")
 	loader := NewReservoirLoader(conv, &classificationFilter{discard: 7}, 100, 2, t.TempDir(), ioFactory, requested)
 
-	mkAttrs := func(class uint8) []model.Attribute {
-		return []model.Attribute{{Name: "classification", Type: model.AttributeUint8, Value: class}}
+	mkAttrs := func(class uint8) model.AttributeValues {
+		return model.AttributeValues{class}
 	}
 	reader := &pc.MockLasReader{
-		CRS: "EPSG:4978",
+		CRS:    "EPSG:4978",
+		Schema: []model.AttributeDescriptor{{Name: "classification", Type: model.AttributeUint8}},
 		Pts: []geom.Point64{
 			{Vector: model.Vector{X: 4399228.288985, Y: 855784.797006, Z: 0}, Attributes: mkAttrs(2)},
 			{Vector: model.Vector{X: 4399238.288985, Y: 855784.797006, Z: 0}, Attributes: mkAttrs(7)}, // dropped

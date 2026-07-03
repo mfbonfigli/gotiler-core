@@ -258,9 +258,10 @@ opts := tiler.NewTilerOptions(
 
 ### Custom Mutator
 
-Mutators receive the point in local coordinates plus the reader-provided
-attributes of the point, and return the (possibly modified) point, the
-attributes to store, and whether to keep the point:
+Mutators receive the point in local coordinates plus a typed view over the
+point's optional attributes, and return the (possibly modified) point and
+whether to keep it. Attribute changes made through the view's setters are
+applied in place and flow into the output tiles:
 
 ```go
 type ClassificationFilter struct {
@@ -269,23 +270,24 @@ type ClassificationFilter struct {
 
 func (f ClassificationFilter) Mutate(
 	pt model.Point,
-	attrs []model.Attribute,
+	attrs model.AttributeView,
 	localToGlobal model.Transform,
-) (model.Point, []model.Attribute, bool) {
-	for _, a := range attrs {
-		if a.Name == model.AttrClassification {
-			if v, ok := a.Value.(uint8); ok {
-				return pt, attrs, v == f.Keep
+) (model.Point, bool) {
+	if i := attrs.Index(model.AttrClassification); i >= 0 {
+		if v, err := attrs.Value(i); err == nil {
+			if c, ok := v.(uint8); ok {
+				return pt, c == f.Keep
 			}
 		}
 	}
-	return pt, attrs, true
+	return pt, true
 }
 ```
 
 Then pass it through `WithMutators`. Note that mutators only see attributes
 that were requested via `WithAttributes`: the filter above requires
 `classification` to be part of the requested set.
+
 
 ## Progress Reporting
 

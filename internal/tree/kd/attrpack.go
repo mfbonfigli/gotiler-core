@@ -2,109 +2,44 @@ package kd
 
 import (
 	"encoding/binary"
-	"fmt"
 	"math"
-	"sync/atomic"
 
 	"github.com/mfbonfigli/gotiler-core/tiler/model"
 )
 
 // initializeAttributeSummaries resolves the requested attributes against the
-// first point's reader-provided attributes. Requested attributes absent from
-// the first point get an empty type and SkipIncomplete=true: they take no room
-// in the packed layout and encoders omit them.
-func initializeAttributeSummaries(requested model.Attributes, firstAttrs []model.Attribute) []model.AttributeSummary {
+// reader's declared schema. Summaries are laid out in SCHEMA order so a
+// point's reader-provided packed values are byte-identical to the tree's
+// storage layout and flow through the pipeline without re-encoding. Requested
+// attributes absent from the schema are appended with an empty type and
+// SkipIncomplete=true: they take no room in the packed layout and encoders
+// omit them.
+func initializeAttributeSummaries(requested model.Attributes, schema []model.AttributeDescriptor) []model.AttributeSummary {
 	if len(requested) == 0 {
 		return nil
 	}
-	attrsByName := make(map[string]model.Attribute, len(firstAttrs))
-	for _, attr := range firstAttrs {
-		attrsByName[model.CanonicalAttributeName(attr.Name)] = attr
-	}
+	inSchema := make(map[string]struct{}, len(schema))
 	summaries := make([]model.AttributeSummary, 0, len(requested))
+	for _, desc := range schema {
+		inSchema[desc.Name] = struct{}{}
+		summaries = append(summaries, model.AttributeSummary{
+			RequestedName: desc.Name,
+			Name:          desc.Name,
+			Type:          desc.Type,
+		})
+	}
 	for _, req := range requested {
 		canonical := model.CanonicalAttributeName(req)
-		attr, ok := attrsByName[canonical]
-		if !ok {
-			summaries = append(summaries, model.AttributeSummary{
-				RequestedName:  req,
-				Name:           canonical,
-				SkipIncomplete: true,
-			})
+		if _, ok := inSchema[canonical]; ok {
 			continue
 		}
 		summaries = append(summaries, model.AttributeSummary{
-			RequestedName: req,
-			Name:          canonical,
-			Type:          attr.Type,
+			RequestedName:  req,
+			Name:           canonical,
+			SkipIncomplete: true,
 		})
 	}
 	return summaries
-}
-
-// attributePacker encodes reader-provided attributes into the packed
-// model.AttributeValues layout derived from the attribute summaries.
-// Pack is safe for concurrent use; missing-attribute flags are atomic.
-type attributePacker struct {
-	entries []model.AttributeLayoutEntry
-	size    int
-	missing []atomic.Bool // parallel to entries; set when any point lacked the attribute
-}
-
-func newAttributePacker(summaries []model.AttributeSummary) *attributePacker {
-	entries, size := model.AttributeLayout(summaries)
-	return &attributePacker{
-		entries: entries,
-		size:    size,
-		missing: make([]atomic.Bool, len(entries)),
-	}
-}
-
-// pack encodes rawAttrs into dst, which must be p.size bytes long and
-// zero-initialized. Attributes are matched by canonical name (reader names are
-// canonical by contract); entries missing from rawAttrs stay zero and are
-// flagged. A type mismatch with the layout is an error.
-func (p *attributePacker) pack(dst model.AttributeValues, rawAttrs []model.Attribute) error {
-	next := 0 // rolling start index: readers emit attributes in a stable order
-	for i := range p.entries {
-		e := &p.entries[i]
-		idx := -1
-		for j := 0; j < len(rawAttrs); j++ {
-			k := next + j
-			if k >= len(rawAttrs) {
-				k -= len(rawAttrs)
-			}
-			if rawAttrs[k].Name == e.Name {
-				idx = k
-				break
-			}
-		}
-		if idx < 0 {
-			p.missing[i].Store(true)
-			continue
-		}
-		next = idx + 1
-		if next == len(rawAttrs) {
-			next = 0
-		}
-		attr := rawAttrs[idx]
-		if attr.Type != e.Type {
-			return fmt.Errorf("attribute %q has inconsistent type: got %q want %q", e.Name, attr.Type, e.Type)
-		}
-		if err := model.EncodeAttributeValue(dst[e.Offset:e.Offset+e.Size], e.Type, attr.Value); err != nil {
-			return fmt.Errorf("pack attribute %q: %w", e.Name, err)
-		}
-	}
-	return nil
-}
-
-// applyMissing marks summaries whose attribute was absent on at least one point.
-func (p *attributePacker) applyMissing(summaries []model.AttributeSummary) {
-	for i := range p.entries {
-		if p.missing[i].Load() {
-			summaries[p.entries[i].SummaryIndex].SkipIncomplete = true
-		}
-	}
 }
 
 // attrScalar is a running min or max for one attribute, held unboxed.
@@ -185,8 +120,8 @@ func (s *attrStats) apply(summaries []model.AttributeSummary) {
 		if !s.mins[i].set {
 			continue
 		}
-		summaries[e.SummaryIndex].Min = boxAttrScalar(e.Type, s.mins[i])
-		summaries[e.SummaryIndex].Max = boxAttrScalar(e.Type, s.maxs[i])
+		summaries[e.SourceIndex].Min = boxAttrScalar(e.Type, s.mins[i])
+		summaries[e.SourceIndex].Max = boxAttrScalar(e.Type, s.maxs[i])
 	}
 }
 
