@@ -39,6 +39,11 @@ const maxLruCacheSize = 393_216
 // With 0.75: root keeps 1/4, child gets 3/4 → root.GE is √3 ≈ 1.73× higher per level.
 const lodSelectFraction = 0.66
 
+// geometricErrorChildMultiplier keeps emitted parent tile errors slightly above
+// child tile errors so validators and viewers see a strictly decreasing LOD
+// hierarchy.
+const geometricErrorChildMultiplier = 1.01
+
 // voxelKey identifies a voxel cell by its integer grid coordinates.
 type voxelKey struct{ x, y, z int }
 
@@ -258,6 +263,17 @@ func (n *Node) IsLeaf() bool {
 // with an heuristic based on the computation of the available surface area of the tile per point, with
 // an empirical correction factor.
 func (n *Node) GeometricError() float64 {
+	ge := n.rawGeometricError()
+	for _, child := range []*Node{n.left, n.right} {
+		if child == nil || child.TotalNumberOfPoints() <= 0 {
+			continue
+		}
+		ge = math.Max(ge, child.GeometricError()*geometricErrorChildMultiplier)
+	}
+	return ge
+}
+
+func (n *Node) rawGeometricError() float64 {
 	if n.isLeaf {
 		return 0
 	}
@@ -590,7 +606,7 @@ func (n *Node) insertLODChain(ctx context.Context) error {
 
 	targetGE := n.rootTargetGeometricError()
 
-	for i := 0; i < 30 && n.GeometricError() < targetGE; i++ {
+	for i := 0; i < 30 && n.rawGeometricError() < targetGE; i++ {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("insertLODChain cancelled: %w", err)
 		}

@@ -39,6 +39,7 @@ type StandardWriter struct {
 	consumerFunc     func() Consumer
 	writerProvider   plugin.WriterProvider
 	writerMiddleware []plugin.WriterMiddleware
+	writerFinalizers []plugin.WriterFinalizer
 	geCorrection     float64
 	attributes       model.Attributes
 }
@@ -139,6 +140,18 @@ func WithWriterMiddleware(middlewares ...plugin.WriterMiddleware) func(*Standard
 	}
 }
 
+// WithWriterFinalizer registers finalizers to run after all tile content and
+// tileset.json have been written.
+func WithWriterFinalizer(finalizers ...plugin.WriterFinalizer) func(*StandardWriter) {
+	return func(w *StandardWriter) {
+		for _, finalizer := range finalizers {
+			if finalizer != nil {
+				w.writerFinalizers = append(w.writerFinalizers, finalizer)
+			}
+		}
+	}
+}
+
 func (w *StandardWriter) Write(t tree.Tree, folderName string, ctx context.Context, reporter tree.ProgressReporter) error {
 	// Count total tiles and set up progress tracking when a reporter is provided.
 	var (
@@ -235,6 +248,11 @@ func (w *StandardWriter) Write(t tree.Tree, folderName string, ctx context.Conte
 	err := w.writeSquashedTileset(t, rootWriterProvider)
 	if err != nil {
 		return err
+	}
+	for _, finalizer := range w.writerFinalizers {
+		if err := finalizer.Finalize(); err != nil {
+			return err
+		}
 	}
 
 	tree.ReportProgress(reporter, tree.ProgressUpdate{

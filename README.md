@@ -164,6 +164,7 @@ Create options with `tiler.NewDefaultTilerOptions()` or use
 | `WithProgressCallback(cb)` | none | Receives progress events while tiling |
 | `WithWriterProvider(wp)` | disk writer | Allows injecting a custom writer |
 | `WithWriterMiddleware(mw...)` | none | Wraps writer around other writers for custom behaviors |
+| `WithWriterFinalizer(f...)` | none | Runs hooks after all content and `tileset.json` are written |
 | `WithTreeProvider(provider)` | internal KD tree | Allows injecting the tree logic |
 
 ### Output Encoder

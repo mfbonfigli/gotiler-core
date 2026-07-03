@@ -320,6 +320,41 @@ func TestPntsEncoderWithReturnAttributes(t *testing.T) {
 	}
 }
 
+func TestPntsEncoderSectionAlignment(t *testing.T) {
+	attrs := model.NewAttributes(model.AttrIntensity, model.AttrClassification, model.AttrReturnNumber, model.AttrNumberOfReturns)
+	path := encodeToFile(t, NewPntsEncoder("d.pnts", attrs), makeThreePointNode(attrs, 2, 5), "pnts")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read pnts: %v", err)
+	}
+	if len(raw) < pntsHeaderLen {
+		t.Fatalf("pnts too short")
+	}
+	byteLen := int(binary.LittleEndian.Uint32(raw[8:12]))
+	ftJSONLen := int(binary.LittleEndian.Uint32(raw[12:16]))
+	ftBinLen := int(binary.LittleEndian.Uint32(raw[16:20]))
+	btJSONLen := int(binary.LittleEndian.Uint32(raw[20:24]))
+	btBinLen := int(binary.LittleEndian.Uint32(raw[24:28]))
+
+	if byteLen != len(raw) {
+		t.Fatalf("header byte length %d does not match file length %d", byteLen, len(raw))
+	}
+	sectionOffsets := map[string]int{
+		"feature table binary": pntsHeaderLen + ftJSONLen,
+		"batch table JSON":     pntsHeaderLen + ftJSONLen + ftBinLen,
+		"batch table binary":   pntsHeaderLen + ftJSONLen + ftBinLen + btJSONLen,
+		"byte length":          byteLen,
+	}
+	for name, offset := range sectionOffsets {
+		if offset%pntsAlignment != 0 {
+			t.Fatalf("%s offset/length %d is not %d-byte aligned", name, offset, pntsAlignment)
+		}
+	}
+	if btBinLen%pntsAlignment != 0 {
+		t.Fatalf("batch table binary length %d is not %d-byte aligned", btBinLen, pntsAlignment)
+	}
+}
+
 func TestGltfEncoderReturnNumberOnly(t *testing.T) {
 	attrs := model.NewAttributes(model.AttrReturnNumber)
 	path := encodeToFile(t, NewGltfEncoder("d.glb", attrs), makeThreePointNode(attrs, 3, 0), "glb")

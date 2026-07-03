@@ -23,6 +23,11 @@ type captureWriteCloser struct {
 
 type fakeGeometryEncoder struct{}
 
+type fakeWriterFinalizer struct {
+	called bool
+	err    error
+}
+
 func (fakeGeometryEncoder) Write(n tree.Node, wp plugin.WriterProvider, prefix string) error {
 	return nil
 }
@@ -38,6 +43,11 @@ func (fakeGeometryEncoder) ContentFilename() string {
 func (w *captureWriteCloser) Close() error {
 	w.closeFn(w.Bytes())
 	return nil
+}
+
+func (f *fakeWriterFinalizer) Finalize() error {
+	f.called = true
+	return f.err
 }
 
 func TestWriter(t *testing.T) {
@@ -148,6 +158,73 @@ func TestWriterWithCustomWriterProviderWritesTilesetAndContent(t *testing.T) {
 	}
 	if len(writes["tileset.json"]) == 0 {
 		t.Fatalf("expected tileset.json to be written through custom provider")
+	}
+}
+
+func TestWriterRunsFinalizerAfterTileset(t *testing.T) {
+	root := &testtree.MockNode{
+		TotalNumPts: 1,
+		Pts:         geom.NewLinkedPointStream(&geom.LinkedPoint{Pt: geom.NewPoint(1, 2, 3, 4, 5, 6)}, 1),
+		Bounds:      geom.NewBoundingBox(1, 2, 3, 4, 5, 6),
+		Root:        true,
+	}
+	finalizer := &fakeWriterFinalizer{}
+	writes := map[string][]byte{}
+	wp := func(filename string) (io.WriteCloser, error) {
+		return &captureWriteCloser{
+			Buffer: &bytes.Buffer{},
+			closeFn: func(data []byte) {
+				writes[filename] = append([]byte(nil), data...)
+			},
+		}, nil
+	}
+
+	w, err := NewWriter("ignored",
+		WithNumWorkers(1),
+		WithEncoder(plugin.EncoderPNTS),
+		WithWriterProvider(wp),
+		WithWriterFinalizer(finalizer),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	if err := w.Write(root, "", context.TODO(), nil); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+	if !finalizer.called {
+		t.Fatalf("expected finalizer to be called")
+	}
+	if len(writes["tileset.json"]) == 0 {
+		t.Fatalf("expected tileset.json to be written before finalizer")
+	}
+}
+
+func TestWriterPropagatesFinalizerError(t *testing.T) {
+	root := &testtree.MockNode{
+		TotalNumPts: 1,
+		Pts:         geom.NewLinkedPointStream(&geom.LinkedPoint{Pt: geom.NewPoint(1, 2, 3, 4, 5, 6)}, 1),
+		Bounds:      geom.NewBoundingBox(1, 2, 3, 4, 5, 6),
+		Root:        true,
+	}
+	finalizer := &fakeWriterFinalizer{err: fmt.Errorf("archive close failed")}
+	wp := func(filename string) (io.WriteCloser, error) {
+		return &captureWriteCloser{Buffer: &bytes.Buffer{}, closeFn: func([]byte) {}}, nil
+	}
+
+	w, err := NewWriter("ignored",
+		WithNumWorkers(1),
+		WithEncoder(plugin.EncoderPNTS),
+		WithWriterProvider(wp),
+		WithWriterFinalizer(finalizer),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	if err := w.Write(root, "", context.TODO(), nil); err == nil {
+		t.Fatalf("expected finalizer error")
+	}
+	if !finalizer.called {
+		t.Fatalf("expected finalizer to be called")
 	}
 }
 

@@ -80,6 +80,7 @@ func NewGoTiler() (*GoTiler, error) {
 				writer.WithNumWorkers(opts.numWorkers),
 				writer.WithEncoder(opts.encoderID),
 				writer.WithWriterMiddleware(opts.writerMiddleware...),
+				writer.WithWriterFinalizer(opts.writerFinalizers...),
 				writer.WithGECorrection(opts.geCorrection),
 				writer.WithAttributes(opts.attributes),
 			}

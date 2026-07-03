@@ -24,6 +24,12 @@ type WriterProvider func(filename string) (io.WriteCloser, error)
 // between the core writer and its destination, such as client-side encryption.
 type WriterMiddleware func(WriterProvider) WriterProvider
 
+// WriterFinalizer performs work that must happen after all tile content and
+// tileset.json have been written, such as closing an archive index.
+type WriterFinalizer interface {
+	Finalize() error
+}
+
 // GeometryEncoder encodes a tree node into tile content.
 type GeometryEncoder interface {
 	Write(n tree.Node, wp WriterProvider, prefix string) error

@@ -22,6 +22,7 @@ type TilerOptions struct {
 	attributes            model.Attributes
 	writerProvider        plugin.WriterProvider
 	writerMiddleware      []plugin.WriterMiddleware
+	writerFinalizers      []plugin.WriterFinalizer
 	treeProvider          TreeProvider
 }
 
@@ -152,6 +153,19 @@ func WithWriterProvider(wp plugin.WriterProvider) tilerOptionsFn {
 func WithWriterMiddleware(middlewares ...plugin.WriterMiddleware) tilerOptionsFn {
 	return func(o *TilerOptions) {
 		o.writerMiddleware = append(o.writerMiddleware, middlewares...)
+	}
+}
+
+// WithWriterFinalizer registers hooks that run after all generated content and
+// tileset.json files have been written. Use this for archive formats that need
+// to append indexes or close a container.
+func WithWriterFinalizer(finalizers ...plugin.WriterFinalizer) tilerOptionsFn {
+	return func(o *TilerOptions) {
+		for _, finalizer := range finalizers {
+			if finalizer != nil {
+				o.writerFinalizers = append(o.writerFinalizers, finalizer)
+			}
+		}
 	}
 }
 

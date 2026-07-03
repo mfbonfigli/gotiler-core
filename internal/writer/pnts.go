@@ -24,6 +24,8 @@ const bufferSize = 256 * 1024
 
 // totalBytesPerPoint = 12 (xyz) + 3 (rgb) + 2 (intensity) + 1 (classification) = 18
 const totalBytesPerPoint = 18
+const pntsHeaderLen = 28
+const pntsAlignment = 8
 
 // pntsBufPool provides reusable byte buffers for building pnts binary content.
 var pntsBufPool = utils.NewSlicePool[byte](maxPointsPerPntsTileHint * totalBytesPerPoint)
@@ -50,8 +52,9 @@ func (e *PntsEncoder) Write(node tree.Node, wp plugin.WriterProvider, prefix str
 }
 
 func (e *PntsEncoder) generateFeatureTable(numPoints int) ([]byte, int) {
-	featureTableStr := e.generateFeatureTableJsonContent(numPoints, 0)
-	return []byte(featureTableStr), len(featureTableStr)
+	featureTableStr := e.generateFeatureTableJsonContent(numPoints)
+	featureTableBytes := padJSONToAlignment([]byte(featureTableStr), pntsHeaderLen)
+	return featureTableBytes, len(featureTableBytes)
 }
 
 func (e *PntsEncoder) writePntsHeader(numPoints, featureTableLen, batchTableLen, batchBodyLen int, wr io.Writer) error {
@@ -63,9 +66,8 @@ func (e *PntsEncoder) writePntsHeader(numPoints, featureTableLen, batchTableLen,
 	if err != nil {
 		return err
 	}
-	positionBytesLen := 4 * 3 * numPoints
 	// Total file length: header + feature table (JSON + binary) + batch table (JSON + binary)
-	err = utils.WriteIntAs4ByteNumber(28+featureTableLen+positionBytesLen+numPoints*3+batchTableLen+batchBodyLen, wr)
+	err = utils.WriteIntAs4ByteNumber(pntsHeaderLen+featureTableLen+featureTableBinaryLen(numPoints)+batchTableLen+batchBodyLen, wr)
 	if err != nil {
 		return err
 	}
@@ -73,7 +75,7 @@ func (e *PntsEncoder) writePntsHeader(numPoints, featureTableLen, batchTableLen,
 	if err != nil {
 		return err
 	}
-	err = utils.WriteIntAs4ByteNumber(positionBytesLen+numPoints*3, wr) // feature table binary: positions + colors
+	err = utils.WriteIntAs4ByteNumber(featureTableBinaryLen(numPoints), wr) // feature table binary: positions + colors + padding
 	if err != nil {
 		return err
 	}
@@ -88,22 +90,19 @@ func (e *PntsEncoder) writePntsHeader(numPoints, featureTableLen, batchTableLen,
 	return nil
 }
 
-func (e *PntsEncoder) writeTable(tableBytes []byte, wr io.Writer) error {
+func writeBytes(tableBytes []byte, wr io.Writer) error {
+	if len(tableBytes) == 0 {
+		return nil
+	}
 	_, err := wr.Write(tableBytes)
 	return err
 }
 
-// generateFeatureTableJsonContent returns the feature table JSON padded to a 4-byte boundary.
-func (e *PntsEncoder) generateFeatureTableJsonContent(pointNo int, spaceNo int) string {
-	s := fmt.Sprintf(`{"POINTS_LENGTH":%d,"POSITION":{"byteOffset":0},"RGB":{"byteOffset":%d}}%s`,
+func (e *PntsEncoder) generateFeatureTableJsonContent(pointNo int) string {
+	return fmt.Sprintf(`{"POINTS_LENGTH":%d,"POSITION":{"byteOffset":0},"RGB":{"byteOffset":%d}}`,
 		pointNo,
 		pointNo*12,
-		strings.Repeat(" ", spaceNo),
 	)
-	if pad := len(s) % 4; pad != 0 {
-		return e.generateFeatureTableJsonContent(pointNo, 4-pad)
-	}
-	return s
 }
 
 func (e *PntsEncoder) writeGeneric(node tree.Node, wp plugin.WriterProvider, prefix string, columns []encoding.AttributeColumn) error {
@@ -120,11 +119,15 @@ func (e *PntsEncoder) writeGeneric(node tree.Node, wp plugin.WriterProvider, pre
 	attrOffsets := make([]int, len(columns))
 	batchBodyLen := 0
 	for i, col := range columns {
+		batchBodyLen = alignTo(batchBodyLen, pntsAttributeAlignment(col.Summary.Type))
 		attrOffsets[i] = batchBodyLen
 		batchBodyLen += n * col.Size
 	}
+	batchBodyLen = alignTo(batchBodyLen, pntsAlignment)
 
-	batchTableBytes, batchTableLen := e.generateGenericBatchTable(columns, attrOffsets)
+	featureBinaryLen := featureTableBinaryLen(n)
+	batchTableOffset := pntsHeaderLen + featureTableLen + featureBinaryLen
+	batchTableBytes, batchTableLen := e.generateGenericBatchTable(columns, attrOffsets, batchTableOffset)
 
 	f, err := wp(prefix + e.filename)
 	if err != nil {
@@ -141,15 +144,18 @@ func (e *PntsEncoder) writeGeneric(node tree.Node, wp plugin.WriterProvider, pre
 	if err := e.writePntsHeader(n, featureTableLen, batchTableLen, batchBodyLen, wr); err != nil {
 		return err
 	}
-	if err := e.writeTable(featureTableBytes, wr); err != nil {
+	if err := writeBytes(featureTableBytes, wr); err != nil {
 		return err
 	}
 
 	coordsEnd := n * 12
 	colorsEnd := coordsEnd + n*3
-	bufPtr := pntsBufPool.GetWithMinCapacity(colorsEnd + batchBodyLen)
+	featurePaddingLen := featureBinaryLen - colorsEnd
+	bufPtr := pntsBufPool.GetWithMinCapacity(colorsEnd + featurePaddingLen + batchBodyLen)
 	defer pntsBufPool.Put(bufPtr)
 	buf := *bufPtr
+	clear(buf[colorsEnd : colorsEnd+featurePaddingLen])
+	clear(buf[colorsEnd+featurePaddingLen : colorsEnd+featurePaddingLen+batchBodyLen])
 
 	for i := 0; i < n; i++ {
 		pt, err := pts.Next()
@@ -168,11 +174,9 @@ func (e *PntsEncoder) writeGeneric(node tree.Node, wp plugin.WriterProvider, pre
 		// The batch table binary and the packed point values share the same
 		// little-endian scalar encoding, so columns are filled with plain copies.
 		for j, col := range columns {
-			off := colorsEnd + attrOffsets[j] + i*col.Size
+			off := colorsEnd + featurePaddingLen + attrOffsets[j] + i*col.Size
 			if b := encoding.ColumnBytes(pt, col); b != nil {
 				copy(buf[off:off+col.Size], b)
-			} else {
-				clear(buf[off : off+col.Size])
 			}
 		}
 	}
@@ -183,11 +187,17 @@ func (e *PntsEncoder) writeGeneric(node tree.Node, wp plugin.WriterProvider, pre
 	if _, err := wr.Write(buf[coordsEnd:colorsEnd]); err != nil {
 		return err
 	}
-	if err := e.writeTable(batchTableBytes, wr); err != nil {
+	if featurePaddingLen > 0 {
+		if _, err := wr.Write(buf[colorsEnd : colorsEnd+featurePaddingLen]); err != nil {
+			return err
+		}
+	}
+	if err := writeBytes(batchTableBytes, wr); err != nil {
 		return err
 	}
 	if batchBodyLen > 0 {
-		if _, err := wr.Write(buf[colorsEnd : colorsEnd+batchBodyLen]); err != nil {
+		batchBodyStart := colorsEnd + featurePaddingLen
+		if _, err := wr.Write(buf[batchBodyStart : batchBodyStart+batchBodyLen]); err != nil {
 			return err
 		}
 	}
@@ -198,15 +208,16 @@ func (e *PntsEncoder) writeGeneric(node tree.Node, wp plugin.WriterProvider, pre
 	return f.Close()
 }
 
-func (e *PntsEncoder) generateGenericBatchTable(columns []encoding.AttributeColumn, offsets []int) ([]byte, int) {
+func (e *PntsEncoder) generateGenericBatchTable(columns []encoding.AttributeColumn, offsets []int, startOffset int) ([]byte, int) {
 	if len(columns) == 0 {
 		return nil, 0
 	}
-	s := e.generateGenericBatchTableJsonContent(columns, offsets, 0)
-	return []byte(s), len(s)
+	s := e.generateGenericBatchTableJsonContent(columns, offsets)
+	batchTableBytes := padJSONToAlignment([]byte(s), startOffset)
+	return batchTableBytes, len(batchTableBytes)
 }
 
-func (e *PntsEncoder) generateGenericBatchTableJsonContent(columns []encoding.AttributeColumn, offsets []int, spaceNo int) string {
+func (e *PntsEncoder) generateGenericBatchTableJsonContent(columns []encoding.AttributeColumn, offsets []int) string {
 	entries := make([]string, 0, len(columns))
 	for i, col := range columns {
 		componentType, _ := encoding.PntsComponentType(col.Summary.Type)
@@ -216,9 +227,45 @@ func (e *PntsEncoder) generateGenericBatchTableJsonContent(columns []encoding.At
 			componentType,
 		))
 	}
-	s := fmt.Sprintf("{%s}%s", strings.Join(entries, ",\n\t"), strings.Repeat(" ", spaceNo))
-	if pad := len(s) % 4; pad != 0 {
-		return e.generateGenericBatchTableJsonContent(columns, offsets, 4-pad)
+	return fmt.Sprintf("{%s}", strings.Join(entries, ",\n\t"))
+}
+
+func featureTableBinaryLen(numPoints int) int {
+	return alignTo(numPoints*15, pntsAlignment)
+}
+
+func alignTo(n int, alignment int) int {
+	if alignment <= 1 {
+		return n
 	}
-	return s
+	if rem := n % alignment; rem != 0 {
+		return n + alignment - rem
+	}
+	return n
+}
+
+func padJSONToAlignment(jsonBytes []byte, startOffset int) []byte {
+	pad := alignTo(startOffset+len(jsonBytes), pntsAlignment) - (startOffset + len(jsonBytes))
+	if pad == 0 {
+		return jsonBytes
+	}
+	out := make([]byte, len(jsonBytes)+pad)
+	copy(out, jsonBytes)
+	for i := len(jsonBytes); i < len(out); i++ {
+		out[i] = ' '
+	}
+	return out
+}
+
+func pntsAttributeAlignment(t model.AttributeType) int {
+	switch t {
+	case model.AttributeInt16, model.AttributeUint16:
+		return 2
+	case model.AttributeInt32, model.AttributeUint32, model.AttributeFloat32:
+		return 4
+	case model.AttributeFloat64:
+		return 8
+	default:
+		return 1
+	}
 }

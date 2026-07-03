@@ -33,3 +33,31 @@ func TestDefaultRootTargetGeometricErrorHandlesDegenerateBounds(t *testing.T) {
 		t.Fatalf("expected zero target GE for degenerate bounds, got %v", got)
 	}
 }
+
+func TestGeometricErrorClampsAboveChildren(t *testing.T) {
+	parent := NewTree()
+	parent.bounds = geom.NewBoundingBox(0, 10, 0, 10, 0, 10)
+	parent.numPoints.Store(1000)
+	parent.totalPoints.Store(1001)
+
+	child := &Node{
+		Mutex:  parent.Mutex,
+		bounds: parent.bounds,
+		config: parent.config,
+	}
+	child.numPoints.Store(1)
+	child.totalPoints.Store(1)
+	parent.left = child
+
+	rawParent := parent.rawGeometricError()
+	childGE := child.GeometricError()
+	got := parent.GeometricError()
+	want := childGE * geometricErrorChildMultiplier
+
+	if rawParent >= want {
+		t.Fatalf("test setup invalid: raw parent GE %v should be less than clamped GE %v", rawParent, want)
+	}
+	if math.Abs(got-want) > 1e-9 {
+		t.Fatalf("expected parent GE to clamp to child*%.2f (%v), got %v", geometricErrorChildMultiplier, want, got)
+	}
+}
