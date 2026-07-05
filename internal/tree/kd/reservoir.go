@@ -48,6 +48,7 @@ type reservoirLoader struct {
 	tempFolder    string
 	ioFactory     IoFactory
 	attributes    model.Attributes
+	outputAttrs   model.Attributes
 
 	rawBatchPool   *utils.SlicePool[geom.Point64]
 	localBatchPool *utils.SlicePool[model.Point]
@@ -64,7 +65,12 @@ func NewReservoirLoader(
 	tempFolder string,
 	ioFactory IoFactory,
 	attrs model.Attributes,
+	outputAttrs ...model.Attributes,
 ) *reservoirLoader {
+	output := attrs
+	if len(outputAttrs) > 0 {
+		output = outputAttrs[0]
+	}
 	return &reservoirLoader{
 		convFactory:    convFactory,
 		mut:            mut,
@@ -73,6 +79,7 @@ func NewReservoirLoader(
 		tempFolder:     tempFolder,
 		ioFactory:      ioFactory,
 		attributes:     attrs,
+		outputAttrs:    output,
 		rawBatchPool:   utils.NewSlicePool[geom.Point64](pipelineBatchSize),
 		localBatchPool: utils.NewSlicePool[model.Point](pipelineBatchSize),
 		flatCoordsPool: utils.NewSlicePool[float64](pipelineBatchSize * 3),
@@ -113,6 +120,7 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 	defer c.Cleanup()
 
 	attrSummaries := initializeAttributeSummaries(s.attributes, reader.AttributeSchema())
+	markNonOutputAttributeSummaries(attrSummaries, s.outputAttrs)
 	layoutEntries, layoutSize := model.AttributeLayout(attrSummaries)
 	stats := newAttrStats(layoutEntries)
 	if f, ok := s.ioFactory.(attributeIoFactory); ok {

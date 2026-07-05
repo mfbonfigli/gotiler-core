@@ -395,6 +395,10 @@ type classificationFilter struct {
 	discard uint8
 }
 
+func (m *classificationFilter) RequiredAttributes() model.Attributes {
+	return model.NewAttributes("classification")
+}
+
 func (m *classificationFilter) Mutate(pt model.Point, attrs model.AttributeView, t model.Transform) (model.Point, bool) {
 	if i := attrs.Index("classification"); i >= 0 {
 		if v, err := attrs.Value(i); err == nil {

@@ -13,16 +13,30 @@ import (
 	"github.com/mfbonfigli/gotiler-core/internal/utils"
 	"github.com/mfbonfigli/gotiler-core/internal/writer"
 	"github.com/mfbonfigli/gotiler-core/tiler/model"
+	"github.com/mfbonfigli/gotiler-core/tiler/mutator"
 	"github.com/mfbonfigli/gotiler-core/tiler/pointcloud"
 	"github.com/mfbonfigli/gotiler-core/tiler/tree"
 )
+
+type requestingMutator struct {
+	attrs model.Attributes
+}
+
+func (m requestingMutator) RequiredAttributes() model.Attributes {
+	return m.attrs
+}
+
+func (m requestingMutator) Mutate(pt model.Point, attrs model.AttributeView, localToGlobal model.Transform) (model.Point, bool) {
+	return pt, true
+}
 
 func TestTilerDefaults(t *testing.T) {
 	tiler, err := NewGoTiler()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	tr := tiler.treeProvider(treeOptions(NewDefaultTilerOptions()), "")
+	defaultOpts := NewDefaultTilerOptions()
+	tr := tiler.treeProvider(treeOptions(defaultOpts, defaultOpts.attributes), "")
 	switch tr.(type) {
 	case *kd.Node:
 	default:
@@ -58,14 +72,19 @@ func TestTilerProcessFile(t *testing.T) {
 	tr := &testtree.MockNode{}
 	l := &pc.MockLasReader{}
 	opts := NewDefaultTilerOptions()
+	opts.mutators = []mutator.Mutator{requestingMutator{attrs: model.NewAttributes(model.AttrReturnNumber)}}
 	c := context.TODO()
+	var readerAttrs model.Attributes
+	var gotTreeOpts tree.Options
 	tiler.writerProvider = func(folder string, opts *TilerOptions) (writer.Writer, error) {
 		return w, nil
 	}
 	tiler.treeProvider = func(opts tree.Options, output string) tree.Tree {
+		gotTreeOpts = opts
 		return tr
 	}
 	tiler.pointcloudReaderProvider = func(inputFiles []string, sourceCRS string, eightbit bool, attrs model.Attributes) (pointcloud.Reader, error) {
+		readerAttrs = attrs
 		return l, nil
 	}
 
@@ -84,6 +103,15 @@ func TestTilerProcessFile(t *testing.T) {
 	}
 	if actual := tr.Ctx; actual != c {
 		t.Errorf("expected different context")
+	}
+	if !readerAttrs.Has(model.AttrIntensity) || !readerAttrs.Has(model.AttrClassification) || !readerAttrs.Has(model.AttrReturnNumber) {
+		t.Errorf("expected reader attrs to include output attrs plus mutator attrs, got %v", readerAttrs)
+	}
+	if !gotTreeOpts.Attributes.Has(model.AttrReturnNumber) {
+		t.Errorf("expected tree input attrs to include mutator attr, got %v", gotTreeOpts.Attributes)
+	}
+	if gotTreeOpts.OutputAttributes.Has(model.AttrReturnNumber) {
+		t.Errorf("did not expect mutator-only attr in tree output attrs, got %v", gotTreeOpts.OutputAttributes)
 	}
 	if !tr.BuildCalled {
 		t.Errorf("Build was not called on the tree")

@@ -42,6 +42,15 @@ func initializeAttributeSummaries(requested model.Attributes, schema []model.Att
 	return summaries
 }
 
+func markNonOutputAttributeSummaries(summaries []model.AttributeSummary, output model.Attributes) {
+	for i := range summaries {
+		if output.Has(summaries[i].Name) || output.Has(summaries[i].RequestedName) {
+			continue
+		}
+		summaries[i].SkipIncomplete = true
+	}
+}
+
 // attrScalar is a running min or max for one attribute, held unboxed.
 type attrScalar struct {
 	set bool

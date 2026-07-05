@@ -16,7 +16,11 @@ type Options struct {
 	PointsPerTile         int
 	RefineMode            model.RefineMode
 	InitialGeometricError float64
-	Attributes            model.Attributes
+	// Attributes is the full set that readers/tree storage should carry:
+	// output attributes plus mutator-only input attributes.
+	Attributes model.Attributes
+	// OutputAttributes is the user-selected set that may be exported to tiles.
+	OutputAttributes model.Attributes
 }
 
 // Provider creates a Tree for one tiling run.

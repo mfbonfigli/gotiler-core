@@ -49,14 +49,23 @@ func effectivePointsPerTile(opts *TilerOptions) int {
 	return opts.PointsPerTile
 }
 
-func treeOptions(opts *TilerOptions) tree.Options {
+func treeOptions(opts *TilerOptions, inputAttributes model.Attributes) tree.Options {
 	return tree.Options{
 		NumWorkers:            opts.numWorkers,
 		PointsPerTile:         effectivePointsPerTile(opts),
 		RefineMode:            opts.refineMode,
 		InitialGeometricError: opts.initialGeometricError,
-		Attributes:            opts.attributes,
+		Attributes:            inputAttributes,
+		OutputAttributes:      opts.attributes,
 	}
+}
+
+func mergeAttributes(attrSets ...model.Attributes) model.Attributes {
+	var names []string
+	for _, attrs := range attrSets {
+		names = append(names, attrs.Names()...)
+	}
+	return model.NewAttributes(names...)
 }
 
 // NewGoTiler returns a new tiler to be used to convert Point Cloud files into OGC 3D Tiles
@@ -71,6 +80,7 @@ func NewGoTiler() (*GoTiler, error) {
 				kd.WithPointsPerTile(opts.PointsPerTile),
 				kd.WithRefineMode(opts.RefineMode),
 				kd.WithAttributes(opts.Attributes),
+				kd.WithOutputAttributes(opts.OutputAttributes),
 				kd.WithDataFolder(output),
 				kd.WithRootTargetGeomErr(opts.InitialGeometricError),
 			)
@@ -141,7 +151,9 @@ func (t *GoTiler) processFiles(inputFiles []string, outputFolder string, sourceC
 	if opts.treeProvider != nil {
 		provider = opts.treeProvider
 	}
-	tr := provider(treeOptions(opts), outputFolder)
+	mutatorPipeline := mutator.NewPipeline(opts.mutators...)
+	inputAttributes := mergeAttributes(opts.attributes, mutatorPipeline.RequiredAttributes())
+	tr := provider(treeOptions(opts, inputAttributes), outputFolder)
 	defer tr.Dispose()
 
 	inputDesc := fmt.Sprintf("%d files", len(inputFiles))
@@ -169,7 +181,7 @@ func (t *GoTiler) processFiles(inputFiles []string, outputFolder string, sourceC
 		})
 		return err
 	}
-	pointcloudFile, err := t.pointcloudReaderProvider(inputFiles, sourceCRS, opts.eightBitColors, opts.attributes)
+	pointcloudFile, err := t.pointcloudReaderProvider(inputFiles, sourceCRS, opts.eightBitColors, inputAttributes)
 	if err != nil {
 		tree.ReportProgress(reporter, tree.ProgressUpdate{
 			Phase:       "preparation",
@@ -191,7 +203,6 @@ func (t *GoTiler) processFiles(inputFiles []string, outputFolder string, sourceC
 	})
 
 	// PHASES 2+3: READING + SPLITTING — reservoir sampling and leaf distribution
-	mutatorPipeline := mutator.NewPipeline(opts.mutators...)
 	err = tr.Load(pointcloudFile, t.convFactory, mutatorPipeline, ctx, reporter)
 	if err != nil {
 		return err

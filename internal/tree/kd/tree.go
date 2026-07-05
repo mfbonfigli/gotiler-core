@@ -65,6 +65,7 @@ type Config struct {
 	writerPool        *lruWriterPool
 	rootTargetGeomErr float64 // 0 means derive from dataset bounds
 	attributes        model.Attributes
+	outputAttributes  model.Attributes
 	attrSummaries     []model.AttributeSummary
 
 	// Slice pools, used to share memory buffers between tree nodes
@@ -200,6 +201,15 @@ func WithAttributes(attrs model.Attributes) func(*Node) {
 	}
 }
 
+// WithOutputAttributes sets the ordered generic attribute requests eligible
+// for tile output. Attributes present only for mutators remain available during
+// loading but are marked skipped in the exported summaries.
+func WithOutputAttributes(attrs model.Attributes) func(*Node) {
+	return func(t *Node) {
+		t.config.outputAttributes = attrs
+	}
+}
+
 // NewNode istantiates a new non-root node from the given config. To create a tree root node use NewTree instead.
 func NewNode(t *model.Transform, config *Config) *Node {
 	return &Node{
@@ -309,7 +319,11 @@ func (n *Node) AttributeSummaries() []model.AttributeSummary {
 }
 
 func (n *Node) Load(r pointcloud.Reader, cf coor.ConverterFactory, mut mutator.Mutator, ctx context.Context, reporter tree.ProgressReporter) error {
-	loader := NewReservoirLoader(cf, mut, n.config.reservoirSize, n.config.numWorkers, n.config.tmpFolder, n.config.ioFactory, n.config.attributes)
+	outputAttributes := n.config.outputAttributes
+	if outputAttributes == nil {
+		outputAttributes = n.config.attributes
+	}
+	loader := NewReservoirLoader(cf, mut, n.config.reservoirSize, n.config.numWorkers, n.config.tmpFolder, n.config.ioFactory, n.config.attributes, outputAttributes)
 	res, err := loader.Run(r, ctx, reporter)
 	if err != nil {
 		return err

@@ -6,6 +6,11 @@ import (
 
 // Mutator defines a generic interface to manipulate coordinates or attributes of points.
 type Mutator interface {
+	// RequiredAttributes returns optional per-point attributes this mutator
+	// needs the reader to provide as input. Names are canonicalized by the
+	// tiler before they are passed to readers.
+	RequiredAttributes() model.Attributes
+
 	// Mutate transforms or discards the points in input.
 	//
 	// The function receives in input the point, with coordinates expressed in

@@ -262,11 +262,16 @@ opts := tiler.NewTilerOptions(
 Mutators receive the point in local coordinates plus a typed view over the
 point's optional attributes, and return the (possibly modified) point and
 whether to keep it. Attribute changes made through the view's setters are
-applied in place and flow into the output tiles:
+applied in place; they flow into output tiles when the same attribute is also
+selected through `WithAttributes`:
 
 ```go
 type ClassificationFilter struct {
 	Keep uint8
+}
+
+func (f ClassificationFilter) RequiredAttributes() model.Attributes {
+	return model.NewAttributes(model.AttrClassification)
 }
 
 func (f ClassificationFilter) Mutate(
@@ -285,9 +290,10 @@ func (f ClassificationFilter) Mutate(
 }
 ```
 
-Then pass it through `WithMutators`. Note that mutators only see attributes
-that were requested via `WithAttributes`: the filter above requires
-`classification` to be part of the requested set.
+Then pass it through `WithMutators`. `RequiredAttributes` controls which
+attributes are requested from the reader for mutator input, so that the Mutator can force-requests the attributes 
+it needs. However, it still has to handle the case where the attribute doesn't exist in the input dataset. `WithAttributes`
+still controls which attributes are exported to tiles.
 
 
 ## Progress Reporting

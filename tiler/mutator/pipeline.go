@@ -16,6 +16,20 @@ func NewPipeline(m ...Mutator) *Pipeline {
 	}
 }
 
+func (p *Pipeline) RequiredAttributes() model.Attributes {
+	if p == nil || len(p.mutators) == 0 {
+		return nil
+	}
+	var names []string
+	for _, m := range p.mutators {
+		if m == nil {
+			continue
+		}
+		names = append(names, m.RequiredAttributes().Names()...)
+	}
+	return model.NewAttributes(names...)
+}
+
 func (p *Pipeline) Mutate(pt model.Point, attrs model.AttributeView, localToGlobal model.Transform) (model.Point, bool) {
 	for _, m := range p.mutators {
 		keep := true
