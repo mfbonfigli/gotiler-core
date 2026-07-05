@@ -6,11 +6,32 @@ import (
 )
 
 // Standard optional per-point attribute names.
+// These are modeled on the common LAS/LAZ file attributes
 const (
-	AttrIntensity       = "intensity"
-	AttrClassification  = "classification"
-	AttrReturnNumber    = "return_number"
-	AttrNumberOfReturns = "number_of_returns"
+	AttrIntensity                   = "intensity"
+	AttrClassification              = "classification"
+	AttrReturnNumber                = "return_number"
+	AttrNumberOfReturns             = "number_of_returns"
+	AttrScanDirectionFlag           = "scan_direction_flag"
+	AttrEdgeOfFlightLine            = "edge_of_flight_line"
+	AttrClassificationFlags         = "classification_flags"
+	AttrSynthetic                   = "synthetic"
+	AttrKeyPoint                    = "key_point"
+	AttrWithheld                    = "withheld"
+	AttrOverlap                     = "overlap"
+	AttrUserData                    = "user_data"
+	AttrPointSourceId               = "point_source_id"
+	AttrScanAngle                   = "scan_angle"
+	AttrGpsTime                     = "gps_time"
+	AttrNir                         = "nir"
+	AttrScannerChannel              = "scanner_channel"
+	AttrWavePacketDescriptorIndex   = "wave_packet_descriptor_index"
+	AttrWaveformDataOffset          = "waveform_data_offset"
+	AttrWaveformPacketSize          = "waveform_packet_size"
+	AttrReturnPointWaveformLocation = "return_point_waveform_location"
+	AttrWaveformXT                  = "waveform_x_t"
+	AttrWaveformYT                  = "waveform_y_t"
+	AttrWaveformZT                  = "waveform_z_t"
 )
 
 // AttributeType identifies the scalar data type of a per-point attribute.
