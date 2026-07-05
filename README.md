@@ -246,18 +246,30 @@ tree insertion.
 ### Built-In Mutators
 
 ```go
-import "github.com/mfbonfigli/gotiler-core/tiler/mutator"
+import (
+	"github.com/mfbonfigli/gotiler-core/tiler/model"
+	"github.com/mfbonfigli/gotiler-core/tiler/mutator"
+)
+
+colorizer, err := mutator.NewColorizer(model.AttrIntensity, 0, 65535, "grayscale")
+if err != nil {
+	return err
+}
 
 opts := tiler.NewTilerOptions(
 	tiler.WithMutators([]mutator.Mutator{
 		mutator.NewZOffset(1.5),
 		mutator.NewWithheldFilter(),
+		colorizer,
 	}),
 )
 ```
 
 `NewZOffset` shifts local Z coordinates.
 `NewWithheldFilter` discards points whose `withheld` attribute is true.
+`NewColorizer` maps a numeric attribute or local point coordinate (`x`, `y`,
+or `z`) to point RGB values using a registered gradient alias and max min absolute scale bounds for the alias. 
+Available aliases are: `grayscale`, `heat`, `viridis`, and `las-classification`.
 
 ### Custom Mutator
 
