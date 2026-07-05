@@ -1,6 +1,10 @@
 package model
 
-import "fmt"
+import (
+	"encoding/binary"
+	"fmt"
+	"math"
+)
 
 // AttributeDescriptor describes one per-point attribute emitted by a reader:
 // its canonical name and scalar type. A reader's schema (ordered descriptor
@@ -106,6 +110,116 @@ func (v AttributeView) Value(i int) (any, error) {
 		return ZeroAttributeValue(e.Type), nil
 	}
 	return DecodeAttributeValue(v.data[e.Offset:e.Offset+e.Size], e.Type)
+}
+
+func (v AttributeView) raw(i int, typ AttributeType) ([]byte, bool, error) {
+	e := &v.entries[i]
+	if e.Type != typ {
+		return nil, false, fmt.Errorf("attribute %q has type %q, not %q", e.Name, e.Type, typ)
+	}
+	if len(v.data) < e.Offset+e.Size {
+		return nil, false, nil
+	}
+	return v.data[e.Offset : e.Offset+e.Size], true, nil
+}
+
+// Bool decodes the i-th attribute as bool without boxing.
+func (v AttributeView) Bool(i int) (bool, error) {
+	raw, ok, err := v.raw(i, AttributeBool)
+	if err != nil || !ok {
+		return false, err
+	}
+	return raw[0] != 0, nil
+}
+
+// Int8 decodes the i-th attribute as int8 without boxing.
+func (v AttributeView) Int8(i int) (int8, error) {
+	raw, ok, err := v.raw(i, AttributeInt8)
+	if err != nil || !ok {
+		return 0, err
+	}
+	return int8(raw[0]), nil
+}
+
+// Uint8 decodes the i-th attribute as uint8 without boxing.
+func (v AttributeView) Uint8(i int) (uint8, error) {
+	raw, ok, err := v.raw(i, AttributeUint8)
+	if err != nil || !ok {
+		return 0, err
+	}
+	return raw[0], nil
+}
+
+// Int16 decodes the i-th attribute as int16 without boxing.
+func (v AttributeView) Int16(i int) (int16, error) {
+	raw, ok, err := v.raw(i, AttributeInt16)
+	if err != nil || !ok {
+		return 0, err
+	}
+	return int16(binary.LittleEndian.Uint16(raw)), nil
+}
+
+// Uint16 decodes the i-th attribute as uint16 without boxing.
+func (v AttributeView) Uint16(i int) (uint16, error) {
+	raw, ok, err := v.raw(i, AttributeUint16)
+	if err != nil || !ok {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint16(raw), nil
+}
+
+// Int32 decodes the i-th attribute as int32 without boxing.
+func (v AttributeView) Int32(i int) (int32, error) {
+	raw, ok, err := v.raw(i, AttributeInt32)
+	if err != nil || !ok {
+		return 0, err
+	}
+	return int32(binary.LittleEndian.Uint32(raw)), nil
+}
+
+// Uint32 decodes the i-th attribute as uint32 without boxing.
+func (v AttributeView) Uint32(i int) (uint32, error) {
+	raw, ok, err := v.raw(i, AttributeUint32)
+	if err != nil || !ok {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint32(raw), nil
+}
+
+// Int64 decodes the i-th attribute as int64 without boxing.
+func (v AttributeView) Int64(i int) (int64, error) {
+	raw, ok, err := v.raw(i, AttributeInt64)
+	if err != nil || !ok {
+		return 0, err
+	}
+	return int64(binary.LittleEndian.Uint64(raw)), nil
+}
+
+// Uint64 decodes the i-th attribute as uint64 without boxing.
+func (v AttributeView) Uint64(i int) (uint64, error) {
+	raw, ok, err := v.raw(i, AttributeUint64)
+	if err != nil || !ok {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint64(raw), nil
+}
+
+// Float32 decodes the i-th attribute as float32 without boxing.
+func (v AttributeView) Float32(i int) (float32, error) {
+	raw, ok, err := v.raw(i, AttributeFloat32)
+	if err != nil || !ok {
+		return 0, err
+	}
+	return math.Float32frombits(binary.LittleEndian.Uint32(raw)), nil
+}
+
+// Float64 decodes the i-th attribute as float64 without boxing.
+func (v AttributeView) Float64(i int) (float64, error) {
+	raw, ok, err := v.raw(i, AttributeFloat64)
+	if err != nil || !ok {
+		return 0, err
+	}
+	return math.Float64frombits(binary.LittleEndian.Uint64(raw)), nil
 }
 
 // SetValue encodes val as the i-th attribute value, writing through to the

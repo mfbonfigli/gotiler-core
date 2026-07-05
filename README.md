@@ -251,11 +251,13 @@ import "github.com/mfbonfigli/gotiler-core/tiler/mutator"
 opts := tiler.NewTilerOptions(
 	tiler.WithMutators([]mutator.Mutator{
 		mutator.NewZOffset(1.5),
+		mutator.NewWithheldFilter(),
 	}),
 )
 ```
 
 `NewZOffset` shifts local Z coordinates.
+`NewWithheldFilter` discards points whose `withheld` attribute is true.
 
 ### Custom Mutator
 
