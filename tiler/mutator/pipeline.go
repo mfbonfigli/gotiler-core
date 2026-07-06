@@ -55,6 +55,44 @@ func (p *Pipeline) MutateChunk(chunk PointChunk, localToGlobal model.Transform) 
 	return points
 }
 
+// HasWriteMutators reports whether at least one registered mutator also acts
+// at write time. Callers can use it to skip write-time mutation entirely when
+// no registered mutator needs it.
+func (p *Pipeline) HasWriteMutators() bool {
+	if p == nil {
+		return false
+	}
+	for _, m := range p.mutators {
+		if m == nil {
+			continue
+		}
+		if _, ok := m.(WriteMutator); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// MutateChunkOnWrite applies, in registration order, the registered mutators
+// that implement WriteMutator; the others are skipped.
+func (p *Pipeline) MutateChunkOnWrite(chunk PointChunk, localToGlobal model.Transform) []model.Point {
+	if p == nil || len(p.mutators) == 0 {
+		return chunk.Points
+	}
+	points := chunk.Points
+	for _, m := range p.mutators {
+		wm, ok := m.(WriteMutator)
+		if !ok {
+			continue
+		}
+		points = wm.MutateChunkOnWrite(PointChunk{
+			Points:          points,
+			AttributeLayout: chunk.AttributeLayout,
+		}, localToGlobal)
+	}
+	return points
+}
+
 func (p *Pipeline) Close() error {
 	if p == nil {
 		return nil

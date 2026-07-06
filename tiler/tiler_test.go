@@ -13,6 +13,7 @@ import (
 	"github.com/mfbonfigli/gotiler-core/internal/utils"
 	"github.com/mfbonfigli/gotiler-core/internal/writer"
 	coor "github.com/mfbonfigli/gotiler-core/tiler/coord"
+	"github.com/mfbonfigli/gotiler-core/tiler/geom"
 	"github.com/mfbonfigli/gotiler-core/tiler/model"
 	"github.com/mfbonfigli/gotiler-core/tiler/mutator"
 	"github.com/mfbonfigli/gotiler-core/tiler/pointcloud"
@@ -171,6 +172,72 @@ func TestTilerProcessFile(t *testing.T) {
 	}
 	if actual := w.Ctx; actual != c {
 		t.Errorf("expected different context")
+	}
+}
+
+// paintingWriteMutator is a write-capable mutator that colors points at write time.
+type paintingWriteMutator struct{}
+
+func (paintingWriteMutator) RequiredAttributes() model.Attributes {
+	return nil
+}
+
+func (paintingWriteMutator) MutateChunk(chunk mutator.PointChunk, localToGlobal model.Transform) []model.Point {
+	return chunk.Points
+}
+
+func (paintingWriteMutator) MutateChunkOnWrite(chunk mutator.PointChunk, localToGlobal model.Transform) []model.Point {
+	for i := range chunk.Points {
+		chunk.Points[i].R = 42
+	}
+	return chunk.Points
+}
+
+func (paintingWriteMutator) Close() error {
+	return nil
+}
+
+func TestTilerProcessFileWrapsTreeForWriteMutators(t *testing.T) {
+	tiler, err := NewGoTiler()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	w := &writer.MockWriter{}
+	tr := &testtree.MockNode{
+		Pts: geom.NewLinkedPointStream(&geom.LinkedPoint{Pt: geom.NewPoint(1, 2, 3, 1, 2, 3)}, 1),
+	}
+	l := &pc.MockLasReader{}
+	opts := NewDefaultTilerOptions()
+	opts.mutators = []mutator.Mutator{paintingWriteMutator{}}
+	tiler.writerProvider = func(folder string, opts *TilerOptions) (writer.Writer, error) {
+		return w, nil
+	}
+	tiler.treeProvider = func(opts tree.Options, output string) tree.Tree {
+		return tr
+	}
+	tiler.pointcloudReaderProvider = func(inputFiles []string, sourceCRS string, eightbit bool, attrs model.Attributes) (pointcloud.Reader, error) {
+		return l, nil
+	}
+
+	if err := tiler.ProcessFiles([]string{"abc.las"}, "out", "EPSG:123", opts, context.TODO()); err != nil {
+		t.Fatalf("ProcessFiles: %v", err)
+	}
+	if !w.WriteCalled {
+		t.Fatal("Write was not called on the writer")
+	}
+	if w.Tr == tree.Tree(tr) {
+		t.Fatal("expected the exported tree to be wrapped for write mutation")
+	}
+	pts, err := w.Tr.RootNode().Points()
+	if err != nil {
+		t.Fatalf("Points: %v", err)
+	}
+	pt, err := pts.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if pt.R != 42 {
+		t.Fatalf("expected write-mutated point, got R=%d", pt.R)
 	}
 }
 

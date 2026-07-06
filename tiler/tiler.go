@@ -242,7 +242,13 @@ func (t *GoTiler) processFiles(inputFiles []string, outputFolder string, sourceC
 		})
 		return err
 	}
-	err = w.Write(tr, "", ctx, reporter)
+	// Mutators that act at write time see the points through a view of the
+	// tree that streams every tile's points through the pipeline.
+	exportTree := tree.Tree(tr)
+	if mutatorPipeline.HasWriteMutators() {
+		exportTree = writer.WrapTreeWithWriteMutation(tr, mutatorPipeline)
+	}
+	err = w.Write(exportTree, "", ctx, reporter)
 	if err != nil {
 		return err
 	}

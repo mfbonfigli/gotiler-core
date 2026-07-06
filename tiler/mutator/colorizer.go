@@ -5,6 +5,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/mfbonfigli/gotiler-core/tiler/model"
 )
@@ -32,6 +33,14 @@ type ColorGradientScale struct {
 	Nums              []float64
 	Colors            []Color
 	InterpolationMode GradientInterpolationMode
+	// FixedRange pins the gradient to the absolute value range
+	// [RangeMin, RangeMax]: the Colorizer uses it instead of the range
+	// observed in the data. This is meant for gradients whose stops encode
+	// absolute values, like categorical class palettes, where scaling to the
+	// data would remap the categories.
+	FixedRange bool
+	RangeMin   float64
+	RangeMax   float64
 }
 
 var (
@@ -111,6 +120,10 @@ var (
 				{R: 120, G: 120, B: 120},
 			},
 			InterpolationMode: GradientInterpolationFlat,
+			// class codes are absolute: never rescale them to the data
+			FixedRange: true,
+			RangeMin:   0,
+			RangeMax:   255,
 		},
 	}
 )
@@ -140,51 +153,70 @@ func RegisteredColorGradient(alias string) (ColorGradientScale, bool) {
 	return cloneColorGradient(gradient), true
 }
 
-// Colorizer colors points using a numeric per-point attribute.
+// Colorizer colors points using a numeric per-point attribute or a local
+// point coordinate (x, y or z). The value range is derived from the data:
+// during loading it observes the attribute's min and max without touching the
+// points, then colors the points as tiles are written, scaling the gradient
+// over the observed range. Gradients that declare a FixedRange (like
+// las-classification, whose stops encode absolute class codes) are never
+// rescaled to the data: their declared range is used as is. Because colors
+// are applied only at write time, the RGB values stored in the tree keep
+// their source values.
 type Colorizer struct {
 	attribute string
-	nums      []float64
-	colors    []Color
-	mode      GradientInterpolationMode
+	gradient  ColorGradientScale
+
+	// fixed is the mapping built upfront when the gradient declares a
+	// FixedRange; observation and run resets are skipped entirely then.
+	fixed *colorMapping
+
+	// mu guards the observed range and the phase transitions; frozen holds the
+	// write-time mapping so MutateChunkOnWrite can run lock-free once built.
+	mu     sync.Mutex
+	min    float64
+	max    float64
+	seen   bool
+	frozen atomic.Pointer[frozenMapping]
 }
 
-// NewColorizer creates a Colorizer from a registered gradient alias. The
-// gradient stops are scaled so normalized 0 maps to minRange and 1 maps to maxRange.
-func NewColorizer(attributeName string, minRange, maxRange float64, gradientAlias string) (*Colorizer, error) {
+// frozenMapping is the immutable write-phase mapping. A nil colorMapping
+// means no finite attribute value was observed, so points pass through
+// unchanged.
+type frozenMapping struct {
+	m *colorMapping
+}
+
+// NewColorizer creates a Colorizer from a registered gradient alias.
+func NewColorizer(attributeName, gradientAlias string) (*Colorizer, error) {
 	gradient, ok := RegisteredColorGradient(gradientAlias)
 	if !ok {
 		return nil, fmt.Errorf("unknown color gradient %q", gradientAlias)
 	}
-	return NewColorizerWithGradient(attributeName, minRange, maxRange, gradient)
+	return NewColorizerWithGradient(attributeName, gradient)
 }
 
-// NewColorizerWithGradient creates a Colorizer using an explicit gradient definition.
-func NewColorizerWithGradient(attributeName string, minRange, maxRange float64, gradient ColorGradientScale) (*Colorizer, error) {
+// NewColorizerWithGradient creates a Colorizer using an explicit gradient
+// definition.
+func NewColorizerWithGradient(attributeName string, gradient ColorGradientScale) (*Colorizer, error) {
 	attribute := model.CanonicalAttributeName(attributeName)
 	if attribute == "" {
 		return nil, fmt.Errorf("attribute name cannot be empty")
 	}
-	if !isFinite(minRange) || !isFinite(maxRange) {
-		return nil, fmt.Errorf("colorizer range must be finite")
-	}
-	if minRange >= maxRange {
-		return nil, fmt.Errorf("colorizer min range %v must be less than max range %v", minRange, maxRange)
-	}
 	if err := validateColorGradient(gradient); err != nil {
 		return nil, err
 	}
-	nums := make([]float64, len(gradient.Nums))
-	scale := maxRange - minRange
-	for i, n := range gradient.Nums {
-		nums[i] = minRange + n*scale
-	}
-	colors := append([]Color(nil), gradient.Colors...)
-	return &Colorizer{
+	c := &Colorizer{
 		attribute: attribute,
-		nums:      nums,
-		colors:    colors,
-		mode:      gradient.InterpolationMode,
-	}, nil
+		gradient:  cloneColorGradient(gradient),
+	}
+	if gradient.FixedRange {
+		fixed, err := newColorMapping(attribute, gradient.RangeMin, gradient.RangeMax, gradient)
+		if err != nil {
+			return nil, err
+		}
+		c.fixed = fixed
+	}
+	return c, nil
 }
 
 func (c *Colorizer) RequiredAttributes() model.Attributes {
@@ -197,8 +229,166 @@ func (c *Colorizer) RequiredAttributes() model.Attributes {
 	return model.NewAttributes(c.attribute)
 }
 
+// MutateChunk observes the attribute's range and returns the points unchanged.
+// Gradients with a fixed range need no observation, so it is a no-op for them.
 func (c *Colorizer) MutateChunk(chunk PointChunk, localToGlobal model.Transform) []model.Point {
-	if c == nil || len(chunk.Points) == 0 {
+	if c == nil || c.fixed != nil {
+		return chunk.Points
+	}
+	mn, mx, ok := chunkValueRange(c.attribute, chunk)
+	c.mu.Lock()
+	// A read call after write calls means a new tiling run started: discard
+	// the previous run's range and mapping before observing.
+	if c.frozen.Load() != nil {
+		c.frozen.Store(nil)
+		c.seen = false
+	}
+	if ok {
+		if !c.seen {
+			c.min, c.max = mn, mx
+			c.seen = true
+		} else {
+			if mn < c.min {
+				c.min = mn
+			}
+			if mx > c.max {
+				c.max = mx
+			}
+		}
+	}
+	c.mu.Unlock()
+	return chunk.Points
+}
+
+// MutateChunkOnWrite colors the points using the gradient scaled over the
+// fixed range, when the gradient declares one, or over the range observed
+// during loading. If the range is not fixed and the attribute was never
+// observed with a finite value, points pass through unchanged.
+func (c *Colorizer) MutateChunkOnWrite(chunk PointChunk, localToGlobal model.Transform) []model.Point {
+	if c == nil {
+		return chunk.Points
+	}
+	if c.fixed != nil {
+		return c.fixed.mutateChunk(chunk)
+	}
+	f := c.frozen.Load()
+	if f == nil {
+		f = c.freeze()
+	}
+	if f.m == nil {
+		return chunk.Points
+	}
+	return f.m.mutateChunk(chunk)
+}
+
+func (c *Colorizer) Close() error {
+	return nil
+}
+
+// freeze builds the write-phase mapping from the observed range exactly once
+// per run; concurrent callers get the same mapping.
+func (c *Colorizer) freeze() *frozenMapping {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if f := c.frozen.Load(); f != nil {
+		return f
+	}
+	f := &frozenMapping{}
+	if c.seen {
+		mn, mx := c.min, c.max
+		if mn == mx {
+			// a single-valued attribute has no meaningful range: widen it so
+			// every point maps to the gradient midpoint.
+			mn -= 0.5
+			mx += 0.5
+		}
+		if m, err := newColorMapping(c.attribute, mn, mx, c.gradient); err == nil {
+			f.m = m
+		}
+	}
+	c.frozen.Store(f)
+	return f
+}
+
+// chunkValueRange returns the min and max finite values of the attribute in
+// the chunk, or ok=false when the chunk holds none.
+func chunkValueRange(attribute string, chunk PointChunk) (mn, mx float64, ok bool) {
+	observe := func(v float64) {
+		if !ok {
+			mn, mx, ok = v, v, true
+			return
+		}
+		if v < mn {
+			mn = v
+		}
+		if v > mx {
+			mx = v
+		}
+	}
+	if fieldValue := colorizerPointFieldGetter(attribute); fieldValue != nil {
+		for i := range chunk.Points {
+			v := fieldValue(chunk.Points[i])
+			if !isFinite(v) {
+				continue
+			}
+			observe(v)
+		}
+		return mn, mx, ok
+	}
+	layout := model.NewAttributeView(chunk.AttributeLayout, nil)
+	attrIndex := layout.Index(attribute)
+	if attrIndex < 0 {
+		return 0, 0, false
+	}
+	extract := attributeFloat64Extractor(layout.Type(attrIndex))
+	if extract == nil {
+		return 0, 0, false
+	}
+	for i := range chunk.Points {
+		v, vok := extract(chunk.AttributeView(i), attrIndex)
+		if !vok {
+			continue
+		}
+		observe(v)
+	}
+	return mn, mx, ok
+}
+
+// colorMapping colors points by mapping a numeric per-point attribute over an
+// absolute value range. It is the immutable per-point machinery behind
+// Colorizer.
+type colorMapping struct {
+	attribute string
+	nums      []float64
+	colors    []Color
+	mode      GradientInterpolationMode
+}
+
+// newColorMapping builds a mapping scaling the gradient stops so normalized 0
+// maps to minRange and 1 maps to maxRange. attribute must be canonical.
+func newColorMapping(attribute string, minRange, maxRange float64, gradient ColorGradientScale) (*colorMapping, error) {
+	if !isFinite(minRange) || !isFinite(maxRange) {
+		return nil, fmt.Errorf("colorizer range must be finite")
+	}
+	if minRange >= maxRange {
+		return nil, fmt.Errorf("colorizer min range %v must be less than max range %v", minRange, maxRange)
+	}
+	nums := make([]float64, len(gradient.Nums))
+	scale := maxRange - minRange
+	for i, n := range gradient.Nums {
+		nums[i] = minRange + n*scale
+	}
+	colors := append([]Color(nil), gradient.Colors...)
+	return &colorMapping{
+		attribute: attribute,
+		nums:      nums,
+		colors:    colors,
+		mode:      gradient.InterpolationMode,
+	}, nil
+}
+
+func (c *colorMapping) mutateChunk(chunk PointChunk) []model.Point {
+	if len(chunk.Points) == 0 {
 		return chunk.Points
 	}
 	// the field-vs-attribute decision, the attribute lookup and the type
@@ -233,11 +423,7 @@ func (c *Colorizer) MutateChunk(chunk PointChunk, localToGlobal model.Transform)
 	return chunk.Points
 }
 
-func (c *Colorizer) Close() error {
-	return nil
-}
-
-func (c *Colorizer) colorizePoint(pt *model.Point, value float64) {
+func (c *colorMapping) colorizePoint(pt *model.Point, value float64) {
 	color := c.color(value)
 	pt.R = color.R
 	pt.G = color.G
@@ -263,7 +449,7 @@ func colorizerPointFieldGetter(attribute string) func(model.Point) float64 {
 	}
 }
 
-func (c *Colorizer) color(value float64) Color {
+func (c *colorMapping) color(value float64) Color {
 	if value <= c.nums[0] {
 		return c.colors[0]
 	}
@@ -399,6 +585,14 @@ func validateColorGradient(gradient ColorGradientScale) error {
 	if gradient.Nums[len(gradient.Nums)-1] != 1 {
 		return fmt.Errorf("gradient last stop must be 1")
 	}
+	if gradient.FixedRange {
+		if !isFinite(gradient.RangeMin) || !isFinite(gradient.RangeMax) {
+			return fmt.Errorf("gradient fixed range must be finite")
+		}
+		if gradient.RangeMin >= gradient.RangeMax {
+			return fmt.Errorf("gradient fixed range min %v must be less than max %v", gradient.RangeMin, gradient.RangeMax)
+		}
+	}
 	return nil
 }
 
@@ -407,6 +601,9 @@ func cloneColorGradient(gradient ColorGradientScale) ColorGradientScale {
 		Nums:              append([]float64(nil), gradient.Nums...),
 		Colors:            append([]Color(nil), gradient.Colors...),
 		InterpolationMode: gradient.InterpolationMode,
+		FixedRange:        gradient.FixedRange,
+		RangeMin:          gradient.RangeMin,
+		RangeMax:          gradient.RangeMax,
 	}
 }
 

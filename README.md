@@ -251,7 +251,7 @@ import (
 	"github.com/mfbonfigli/gotiler-core/tiler/mutator"
 )
 
-colorizer, err := mutator.NewColorizer(model.AttrIntensity, 0, 65535, "grayscale")
+colorizer, err := mutator.NewColorizer(model.AttrIntensity, "grayscale")
 if err != nil {
 	return err
 }
@@ -268,8 +268,36 @@ opts := tiler.NewTilerOptions(
 `NewZOffset` shifts local Z coordinates.
 `NewWithheldFilter` discards points whose `withheld` attribute is true.
 `NewColorizer` maps a numeric attribute or local point coordinate (`x`, `y`,
-or `z`) to point RGB values using a registered gradient alias and max min absolute scale bounds for the alias. 
-Available aliases are: `grayscale`, `heat`, `viridis`, and `las-classification`.
+or `z`) to point RGB values using a registered gradient alias. Available
+aliases are: `grayscale`, `heat`, `viridis`, and `las-classification`. 
+
+No scale bounds are needed: the gradient stretches over the observed range, unless
+the gradient definition fixes it to a specific value range.
+
+Gradients whose stops encode absolute values can opt out of the automatic
+scaling by declaring a fixed range in their definition (`FixedRange`,
+`RangeMin`, `RangeMax` on `ColorGradientScale`). The built-in
+`las-classification` gradient is pinned to `[0, 255]`, so class codes keep
+their colors regardless of which classes appear in the data. Custom gradients
+registered through `RegisterColorGradient` can do the same to pin any absolute
+scale.
+
+### Write-Time Mutators
+
+Mutators normally run while points are loaded, and their changes are baked into
+the tree. A mutator that also implements `mutator.WriteMutator` additionally
+runs while tiles are written:
+
+```go
+MutateChunkOnWrite(chunk mutator.PointChunk, localToGlobal model.Transform) []model.Point
+```
+
+At write time a mutator can rely on statistics gathered over the whole dataset
+during loading (this is how the `Colorizer` derives its range), and its
+changes are not persisted in the tree. Write-time mutation follows a stricter contract:
+points must not be added or dropped, and the mutation must be a deterministic
+function of the point data because the same point can be processed more than
+once. See the `WriteMutator` documentation for details.
 
 ### Custom Mutator
 
