@@ -15,27 +15,27 @@ func TestWithheldFilterRequiredAttributes(t *testing.T) {
 }
 
 func TestWithheldFilterKeepsPointWhenAttributeMissing(t *testing.T) {
-	_, keep := NewWithheldFilter().Mutate(geom.NewPoint(1, 2, 3, 1, 2, 3), model.AttributeView{}, model.IdentityTransform)
+	_, keep := mutateOne(NewWithheldFilter(), geom.NewPoint(1, 2, 3, 1, 2, 3), testAttributeData{}, model.IdentityTransform)
 	if !keep {
 		t.Fatal("expected point without withheld attribute to be kept")
 	}
 }
 
 func TestWithheldFilterKeepsPointWhenWithheldFalse(t *testing.T) {
-	_, keep := NewWithheldFilter().Mutate(geom.NewPoint(1, 2, 3, 1, 2, 3), withheldView(false), model.IdentityTransform)
+	_, keep := mutateOne(NewWithheldFilter(), geom.NewPoint(1, 2, 3, 1, 2, 3), withheldView(false), model.IdentityTransform)
 	if !keep {
 		t.Fatal("expected point with withheld=false to be kept")
 	}
 }
 
 func TestWithheldFilterDropsPointWhenWithheldTrue(t *testing.T) {
-	_, keep := NewWithheldFilter().Mutate(geom.NewPoint(1, 2, 3, 1, 2, 3), withheldView(true), model.IdentityTransform)
+	_, keep := mutateOne(NewWithheldFilter(), geom.NewPoint(1, 2, 3, 1, 2, 3), withheldView(true), model.IdentityTransform)
 	if keep {
 		t.Fatal("expected point with withheld=true to be dropped")
 	}
 }
 
-func withheldView(withheld bool) model.AttributeView {
+func withheldView(withheld bool) testAttributeData {
 	summaries := []model.AttributeSummary{{
 		Name: model.AttrWithheld,
 		Type: model.AttributeBool,
@@ -45,5 +45,5 @@ func withheldView(withheld bool) model.AttributeView {
 	if withheld {
 		values[0] = 1
 	}
-	return model.NewAttributeView(entries, values)
+	return testAttributeData{layout: entries, values: values}
 }

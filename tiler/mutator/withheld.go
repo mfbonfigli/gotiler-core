@@ -13,14 +13,21 @@ func (f *WithheldFilter) RequiredAttributes() model.Attributes {
 	return model.NewAttributes(model.AttrWithheld)
 }
 
-func (f *WithheldFilter) Mutate(pt model.Point, attrs model.AttributeView, localToGlobal model.Transform) (model.Point, bool) {
-	i := attrs.Index(model.AttrWithheld)
+func (f *WithheldFilter) MutateChunk(chunk PointChunk, localToGlobal model.Transform) []model.Point {
+	i := model.NewAttributeView(chunk.AttributeLayout, nil).Index(model.AttrWithheld)
 	if i < 0 {
-		return pt, true
+		return chunk.Points
 	}
-	withheld, err := attrs.Bool(i)
-	if err != nil {
-		return pt, true
+	out := chunk.Points[:0]
+	for idx, pt := range chunk.Points {
+		withheld, err := chunk.AttributeView(idx).Bool(i)
+		if err != nil || !withheld {
+			out = append(out, pt)
+		}
 	}
-	return pt, !withheld
+	return out
+}
+
+func (f *WithheldFilter) Close() error {
+	return nil
 }

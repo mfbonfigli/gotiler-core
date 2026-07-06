@@ -1,6 +1,8 @@
 package mutator
 
 import (
+	"errors"
+
 	"github.com/mfbonfigli/gotiler-core/tiler/model"
 )
 
@@ -30,13 +32,38 @@ func (p *Pipeline) RequiredAttributes() model.Attributes {
 	return model.NewAttributes(names...)
 }
 
-func (p *Pipeline) Mutate(pt model.Point, attrs model.AttributeView, localToGlobal model.Transform) (model.Point, bool) {
+func (p *Pipeline) MutateChunk(chunk PointChunk, localToGlobal model.Transform) []model.Point {
+	if p == nil || len(p.mutators) == 0 {
+		return chunk.Points
+	}
+	points := chunk.Points
 	for _, m := range p.mutators {
-		keep := true
-		pt, keep = m.Mutate(pt, attrs, localToGlobal)
-		if !keep {
-			return pt, false
+		if m == nil {
+			continue
+		}
+		points = MutateChunk(m, PointChunk{
+			Points:          points,
+			AttributeLayout: chunk.AttributeLayout,
+		}, localToGlobal)
+		if len(points) == 0 {
+			return points
 		}
 	}
-	return pt, true
+	return points
+}
+
+func (p *Pipeline) Close() error {
+	if p == nil {
+		return nil
+	}
+	var errs []error
+	for _, m := range p.mutators {
+		if m == nil {
+			continue
+		}
+		if err := m.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }

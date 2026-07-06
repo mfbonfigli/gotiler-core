@@ -17,7 +17,16 @@ func (z *ZOffset) RequiredAttributes() model.Attributes {
 	return nil
 }
 
-func (z *ZOffset) Mutate(pt model.Point, attrs model.AttributeView, localToGlobal model.Transform) (model.Point, bool) {
-	pt.Z += z.Offset
-	return pt, true
+func (z *ZOffset) MutateChunk(chunk PointChunk, localToGlobal model.Transform) []model.Point {
+	if z == nil {
+		return chunk.Points
+	}
+	for i := range chunk.Points {
+		chunk.Points[i].Z += z.Offset
+	}
+	return chunk.Points
+}
+
+func (z *ZOffset) Close() error {
+	return nil
 }

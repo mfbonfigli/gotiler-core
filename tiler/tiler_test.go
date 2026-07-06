@@ -26,8 +26,12 @@ func (m requestingMutator) RequiredAttributes() model.Attributes {
 	return m.attrs
 }
 
-func (m requestingMutator) Mutate(pt model.Point, attrs model.AttributeView, localToGlobal model.Transform) (model.Point, bool) {
-	return pt, true
+func (m requestingMutator) MutateChunk(chunk mutator.PointChunk, localToGlobal model.Transform) []model.Point {
+	return chunk.Points
+}
+
+func (m requestingMutator) Close() error {
+	return nil
 }
 
 func TestTilerDefaults(t *testing.T) {

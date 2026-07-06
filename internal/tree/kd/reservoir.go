@@ -289,13 +289,6 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 						break
 					}
 					localPt.Attributes = rawPt.Attributes
-					keep := true
-					if s.mut != nil {
-						localPt, keep = s.mut.Mutate(localPt, model.NewAttributeView(layoutEntries, localPt.Attributes), localToGlobal)
-						if !keep {
-							continue
-						}
-					}
 					*localBatchPtr = append(*localBatchPtr, localPt)
 				}
 				if attrErr {
@@ -303,6 +296,12 @@ func (s *reservoirLoader) Run(reader pointcloud.Reader, ctx context.Context, rep
 					s.localBatchPool.Put(localBatchPtr)
 					s.rawBatchPool.Put(rawBatchPtr)
 					continue
+				}
+				if s.mut != nil {
+					*localBatchPtr = mutator.MutateChunk(s.mut, mutator.PointChunk{
+						Points:          *localBatchPtr,
+						AttributeLayout: layoutEntries,
+					}, localToGlobal)
 				}
 
 				s.flatCoordsPool.Put(flatCoordsPtr)
@@ -500,10 +499,15 @@ func baseline(reader pointcloud.Reader, c coor.Converter, mut mutator.Mutator, l
 		localPt.Attributes = first.Attributes
 		keep := true
 		if mut != nil {
-			localPt, keep = mut.Mutate(localPt, model.NewAttributeView(layoutEntries, localPt.Attributes), localToGlobal)
+			points := mutator.MutateChunk(mut, mutator.PointChunk{
+				Points:          []model.Point{localPt},
+				AttributeLayout: layoutEntries,
+			}, localToGlobal)
+			keep = len(points) > 0
 			if !keep {
 				continue
 			}
+			localPt = points[0]
 		}
 		return localToGlobal, localPt, nil
 	}

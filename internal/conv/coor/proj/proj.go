@@ -58,6 +58,22 @@ func (cc *projCoordinateConverter) Transform(sourceCRS string, targetCRS string,
 	return model.Vector{X: out.X(), Y: out.Y(), Z: out.Z()}, nil
 }
 
+// TransformFlat transforms a flat slice of XYZ coordinates in-place between arbitrary CRSs.
+// flatCoords layout: [X0, Y0, Z0, X1, Y1, Z1, ...], stride=3.
+func (cc *projCoordinateConverter) TransformFlat(sourceCRS string, targetCRS string, flatCoords []float64) error {
+	if sourceCRS == targetCRS || len(flatCoords) == 0 {
+		return nil
+	}
+	if len(flatCoords)%3 != 0 {
+		return fmt.Errorf("flat coordinate slice length %d is not a multiple of 3", len(flatCoords))
+	}
+	pj, err := cc.getProjection(sourceCRS, targetCRS)
+	if err != nil {
+		return err
+	}
+	return pj.ForwardFlatCoords(flatCoords, 3, 2, -1)
+}
+
 // Converts the input coordinate from the given CRS to EPSG:4978 srid
 func (cc *projCoordinateConverter) ToWGS84Cartesian(sourceCRS string, coord model.Vector) (model.Vector, error) {
 	if sourceCRS == epsg4978crs {
@@ -70,16 +86,7 @@ func (cc *projCoordinateConverter) ToWGS84Cartesian(sourceCRS string, coord mode
 // ToWGS84CartesianFlat transforms a flat slice of XYZ coordinates to EPSG:4978 in-place.
 // flatCoords layout: [X₀, Y₀, Z₀, X₁, Y₁, Z₁, ...], stride=3.
 func (cc *projCoordinateConverter) ToWGS84CartesianFlat(sourceCRS string, flatCoords []float64) error {
-	if sourceCRS == epsg4978crs {
-		return nil
-	}
-
-	pj, err := cc.getProjection(sourceCRS, epsg4978crs)
-	if err != nil {
-		return err
-	}
-
-	return pj.ForwardFlatCoords(flatCoords, 3, 2, -1)
+	return cc.TransformFlat(sourceCRS, epsg4978crs, flatCoords)
 }
 
 // Releases all projection objects from memory

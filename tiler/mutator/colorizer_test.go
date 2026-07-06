@@ -104,7 +104,7 @@ func TestColorizerFlatInterpolation(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		pt, keep := c.Mutate(geom.NewPoint(0, 0, 0, 1, 2, 3), colorizerView(model.AttrIntensity, model.AttributeUint16, tc.value), model.IdentityTransform)
+		pt, keep := mutateOne(c, geom.NewPoint(0, 0, 0, 1, 2, 3), colorizerView(model.AttrIntensity, model.AttributeUint16, tc.value), model.IdentityTransform)
 		if !keep {
 			t.Fatalf("value %d: expected point to be kept", tc.value)
 		}
@@ -120,7 +120,7 @@ func TestColorizerLinearInterpolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewColorizerWithGradient: %v", err)
 	}
-	pt, keep := c.Mutate(geom.NewPoint(0, 0, 0, 1, 2, 3), colorizerView(model.AttrIntensity, model.AttributeFloat32, float32(5)), model.IdentityTransform)
+	pt, keep := mutateOne(c, geom.NewPoint(0, 0, 0, 1, 2, 3), colorizerView(model.AttrIntensity, model.AttributeFloat32, float32(5)), model.IdentityTransform)
 	if !keep {
 		t.Fatal("expected point to be kept")
 	}
@@ -158,7 +158,7 @@ func TestColorizerUsesPointCoordinates(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: NewColorizerWithGradient: %v", tc.attribute, err)
 		}
-		pt, keep := c.Mutate(tc.point, model.AttributeView{}, model.IdentityTransform)
+		pt, keep := mutateOne(c, tc.point, testAttributeData{}, model.IdentityTransform)
 		if !keep {
 			t.Fatalf("%s: expected point to be kept", tc.attribute)
 		}
@@ -177,7 +177,7 @@ func TestColorizerUsesRegisteredGradientAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewColorizer: %v", err)
 	}
-	pt, keep := c.Mutate(geom.NewPoint(0, 0, 0, 1, 2, 3), colorizerView(model.AttrIntensity, model.AttributeUint8, uint8(10)), model.IdentityTransform)
+	pt, keep := mutateOne(c, geom.NewPoint(0, 0, 0, 1, 2, 3), colorizerView(model.AttrIntensity, model.AttributeUint8, uint8(10)), model.IdentityTransform)
 	if !keep {
 		t.Fatal("expected point to be kept")
 	}
@@ -207,7 +207,7 @@ func TestColorizerLASClassificationGradient(t *testing.T) {
 		{255, Color{R: 120, G: 120, B: 120}},
 	}
 	for _, tc := range cases {
-		pt, keep := c.Mutate(geom.NewPoint(0, 0, 0, 1, 2, 3), colorizerView(model.AttrClassification, model.AttributeUint8, tc.class), model.IdentityTransform)
+		pt, keep := mutateOne(c, geom.NewPoint(0, 0, 0, 1, 2, 3), colorizerView(model.AttrClassification, model.AttributeUint8, tc.class), model.IdentityTransform)
 		if !keep {
 			t.Fatalf("class %d: expected point to be kept", tc.class)
 		}
@@ -224,12 +224,15 @@ func TestColorizerLeavesPointUnchangedWhenAttributeMissing(t *testing.T) {
 		t.Fatalf("NewColorizerWithGradient: %v", err)
 	}
 	input := geom.NewPoint(0, 0, 0, 10, 20, 30)
-	got, keep := c.Mutate(input, colorizerView(model.AttrClassification, model.AttributeUint8, uint8(5)), model.IdentityTransform)
+	attrs := colorizerView(model.AttrClassification, model.AttributeUint8, uint8(5))
+	got, keep := mutateOne(c, input, attrs, model.IdentityTransform)
 	if !keep {
 		t.Fatal("expected point to be kept")
 	}
-	if !reflect.DeepEqual(got, input) {
-		t.Fatalf("expected unchanged point, got %+v want %+v", got, input)
+	want := input
+	want.Attributes = attrs.values
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected unchanged point, got %+v want %+v", got, want)
 	}
 }
 
@@ -255,7 +258,7 @@ func TestColorizerSupportsAllAttributeTypes(t *testing.T) {
 		{model.AttributeFloat64, float64(1)},
 	}
 	for _, tc := range cases {
-		pt, keep := c.Mutate(geom.NewPoint(0, 0, 0, 1, 2, 3), colorizerView("value", tc.typ, tc.value), model.IdentityTransform)
+		pt, keep := mutateOne(c, geom.NewPoint(0, 0, 0, 1, 2, 3), colorizerView("value", tc.typ, tc.value), model.IdentityTransform)
 		if !keep {
 			t.Fatalf("type %s: expected point to be kept", tc.typ)
 		}
@@ -275,7 +278,7 @@ func testLinearGradient() ColorGradientScale {
 	}
 }
 
-func colorizerView(name string, typ model.AttributeType, value any) model.AttributeView {
+func colorizerView(name string, typ model.AttributeType, value any) testAttributeData {
 	summaries := []model.AttributeSummary{{
 		Name: model.CanonicalAttributeName(name),
 		Type: typ,
@@ -285,5 +288,5 @@ func colorizerView(name string, typ model.AttributeType, value any) model.Attrib
 	if err := model.EncodeAttributeValue(values[entries[0].Offset:entries[0].Offset+entries[0].Size], typ, value); err != nil {
 		panic(err)
 	}
-	return model.NewAttributeView(entries, values)
+	return testAttributeData{layout: entries, values: values}
 }

@@ -197,33 +197,47 @@ func (c *Colorizer) RequiredAttributes() model.Attributes {
 	return model.NewAttributes(c.attribute)
 }
 
-func (c *Colorizer) Mutate(pt model.Point, attrs model.AttributeView, localToGlobal model.Transform) (model.Point, bool) {
+func (c *Colorizer) MutateChunk(chunk PointChunk, localToGlobal model.Transform) []model.Point {
 	if c == nil {
-		return pt, true
+		return chunk.Points
+	}
+	for i, pt := range chunk.Points {
+		chunk.Points[i] = c.mutatePoint(pt, chunk.AttributeView(i))
+	}
+	return chunk.Points
+}
+
+func (c *Colorizer) Close() error {
+	return nil
+}
+
+func (c *Colorizer) mutatePoint(pt model.Point, attrs model.AttributeView) model.Point {
+	if c == nil {
+		return pt
 	}
 	if value, ok := colorizerPointFieldValue(pt, c.attribute); ok {
 		if !isFinite(value) {
-			return pt, true
+			return pt
 		}
 		color := c.color(value)
 		pt.R = color.R
 		pt.G = color.G
 		pt.B = color.B
-		return pt, true
+		return pt
 	}
 	i := attrs.Index(c.attribute)
 	if i < 0 {
-		return pt, true
+		return pt
 	}
 	value, ok := attributeValueAsFloat64(attrs, i)
 	if !ok {
-		return pt, true
+		return pt
 	}
 	color := c.color(value)
 	pt.R = color.R
 	pt.G = color.G
 	pt.B = color.B
-	return pt, true
+	return pt
 }
 
 func colorizerPointField(attribute string) bool {

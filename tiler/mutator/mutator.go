@@ -4,24 +4,46 @@ import (
 	"github.com/mfbonfigli/gotiler-core/tiler/model"
 )
 
-// Mutator defines a generic interface to manipulate coordinates or attributes of points.
+// Mutator defines a generic interface to manipulate coordinates or attributes
+// of point batches.
 type Mutator interface {
 	// RequiredAttributes returns optional per-point attributes this mutator
 	// needs the reader to provide as input. Names are canonicalized by the
 	// tiler before they are passed to readers.
 	RequiredAttributes() model.Attributes
 
-	// Mutate transforms or discards the points in input.
+	// MutateChunk transforms or discards the points in input.
 	//
-	// The function receives in input the point, with coordinates expressed in
-	// the local CRS with Z-up, a typed view over the point's optional
-	// attributes (empty when none were requested), and a transform object that
-	// can be used to forward transform from the local CRS to the global EPSG
-	// 4978 CRS and inverse transform from the global CRS to the local CRS.
+	// Points are expressed in the local CRS with Z-up. AttributeLayout describes
+	// the packed attributes attached to each point. localToGlobal can be used to
+	// forward transform from the local CRS to global EPSG:4978 and inverse
+	// transform from global CRS back to the local CRS.
 	//
-	// Attribute changes made through the view's setters are applied in place
-	// and flow into the output tiles. The function returns the manipulated
-	// point and true if the point is to be used or false if the point should
-	// be discarded from the final point cloud.
-	Mutate(pt model.Point, attrs model.AttributeView, localToGlobal model.Transform) (model.Point, bool)
+	// Implementations may mutate chunk.Points in place and should return the
+	// kept points, usually as a subslice of chunk.Points.
+	MutateChunk(chunk PointChunk, localToGlobal model.Transform) []model.Point
+
+	// Close releases resources held by the mutator.
+	Close() error
+}
+
+// PointChunk is a mutable batch of local-coordinate points passed to
+// chunk-aware mutators. AttributeLayout describes the packed Attributes blob
+// attached to each point.
+type PointChunk struct {
+	Points          []model.Point
+	AttributeLayout []model.AttributeLayoutEntry
+}
+
+// AttributeView returns a typed view over the i-th point's packed attributes.
+func (c PointChunk) AttributeView(i int) model.AttributeView {
+	return model.NewAttributeView(c.AttributeLayout, c.Points[i].Attributes)
+}
+
+// MutateChunk applies m to the whole chunk.
+func MutateChunk(m Mutator, chunk PointChunk, localToGlobal model.Transform) []model.Point {
+	if m == nil || len(chunk.Points) == 0 {
+		return chunk.Points
+	}
+	return m.MutateChunk(chunk, localToGlobal)
 }

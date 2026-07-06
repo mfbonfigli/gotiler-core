@@ -162,6 +162,40 @@ func TestToWGS84CartesianFlat_Empty(t *testing.T) {
 	}
 }
 
+func TestTransformFlat(t *testing.T) {
+	c, err := NewProjCoordinateConverter()
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	defer c.Cleanup()
+
+	flatCoords := []float64{
+		-3483057.5277292132, 5267517.241803079, 892655.4197953615,
+	}
+	if err := c.TransformFlat("EPSG:4978", "EPSG:4326", flatCoords); err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	expected := model.Vector{X: 123.474003, Y: 8.099314, Z: 0}
+	if err := utils.CompareCoord(
+		model.Vector{X: flatCoords[0], Y: flatCoords[1], Z: flatCoords[2]},
+		expected, coordTolerance,
+	); err != nil {
+		t.Errorf("expected coordinate %v, got %v. Err: %v", expected, flatCoords, err)
+	}
+}
+
+func TestTransformFlatRejectsMisalignedInput(t *testing.T) {
+	c, err := NewProjCoordinateConverter()
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	defer c.Cleanup()
+
+	if err := c.TransformFlat("EPSG:4326", "EPSG:4978", []float64{1, 2}); err == nil {
+		t.Fatal("expected misaligned flat coordinate slice to be rejected")
+	}
+}
+
 func TestTest(t *testing.T) {
 	context := proj.NewContext()
 

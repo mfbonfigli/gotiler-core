@@ -9,7 +9,7 @@ import (
 )
 
 func TestZOffset(t *testing.T) {
-	actual, keep := NewZOffset(2).Mutate(geom.NewPoint(1, 2, 3, 1, 2, 3), model.AttributeView{}, model.Transform{})
+	actual, keep := mutateOne(NewZOffset(2), geom.NewPoint(1, 2, 3, 1, 2, 3), testAttributeData{}, model.Transform{})
 	expected := geom.NewPoint(1, 2, 5, 1, 2, 3)
 	if !reflect.DeepEqual(actual, expected) {
 		t.Errorf("expected %v, got %v", expected, actual)

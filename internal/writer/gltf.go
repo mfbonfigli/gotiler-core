@@ -22,7 +22,7 @@ import (
 
 // Default pool capacity for glTF buffers — sized large enough to cover
 // a typical tile while small enough not to waste memory on tiny tiles.
-const defaultGltfBufferCap = 200000
+const defaultGltfBufferCap = 100000
 
 // srgbToLinear converts an sRGB uint8 channel value to a linear-light uint8 value
 // using the standard gamma 2.2 approximation. Computed once at init, used as a

@@ -145,13 +145,19 @@ func buildPhaseMap(tr tree.Tree) map[string]Phase {
 	return phases
 }
 
-func (t *GoTiler) processFiles(inputFiles []string, outputFolder string, sourceCRS string, opts *TilerOptions, ctx context.Context) error {
+func (t *GoTiler) processFiles(inputFiles []string, outputFolder string, sourceCRS string, opts *TilerOptions, ctx context.Context) (err error) {
 	start := time.Now()
 	provider := t.treeProvider
 	if opts.treeProvider != nil {
 		provider = opts.treeProvider
 	}
 	mutatorPipeline := mutator.NewPipeline(opts.mutators...)
+	defer func() {
+		closeErr := mutatorPipeline.Close()
+		if err == nil {
+			err = closeErr
+		}
+	}()
 	inputAttributes := mergeAttributes(opts.attributes, mutatorPipeline.RequiredAttributes())
 	tr := provider(treeOptions(opts, inputAttributes), outputFolder)
 	defer tr.Dispose()

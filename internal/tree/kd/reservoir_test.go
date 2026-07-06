@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/mfbonfigli/gotiler-core/internal/pc"
@@ -399,15 +400,50 @@ func (m *classificationFilter) RequiredAttributes() model.Attributes {
 	return model.NewAttributes("classification")
 }
 
-func (m *classificationFilter) Mutate(pt model.Point, attrs model.AttributeView, t model.Transform) (model.Point, bool) {
-	if i := attrs.Index("classification"); i >= 0 {
-		if v, err := attrs.Value(i); err == nil {
-			if c, ok := v.(uint8); ok && c == m.discard {
-				return pt, false
+func (m *classificationFilter) MutateChunk(chunk mutator.PointChunk, t model.Transform) []model.Point {
+	out := chunk.Points[:0]
+	for i, pt := range chunk.Points {
+		attrs := chunk.AttributeView(i)
+		if attrIndex := attrs.Index("classification"); attrIndex >= 0 {
+			if v, err := attrs.Value(attrIndex); err == nil {
+				if c, ok := v.(uint8); ok && c == m.discard {
+					continue
+				}
 			}
 		}
+		out = append(out, pt)
 	}
-	return pt, true
+	return out
+}
+
+func (m *classificationFilter) Close() error {
+	return nil
+}
+
+type recordingMutator struct {
+	mu         sync.Mutex
+	chunkSizes []int
+}
+
+func (m *recordingMutator) RequiredAttributes() model.Attributes {
+	return nil
+}
+
+func (m *recordingMutator) MutateChunk(chunk mutator.PointChunk, t model.Transform) []model.Point {
+	m.mu.Lock()
+	m.chunkSizes = append(m.chunkSizes, len(chunk.Points))
+	m.mu.Unlock()
+	return chunk.Points
+}
+
+func (m *recordingMutator) Close() error {
+	return nil
+}
+
+func (m *recordingMutator) snapshot() []int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]int(nil), m.chunkSizes...)
 }
 
 // TestReservoirLoader_AttributeAwareMutator verifies that mutators receive the
@@ -444,5 +480,44 @@ func TestReservoirLoader_AttributeAwareMutator(t *testing.T) {
 	summary := result.attrSummaries[0]
 	if summary.Min != uint8(2) || summary.Max != uint8(5) {
 		t.Errorf("classification min/max should reflect only kept points: got %v/%v want 2/5", summary.Min, summary.Max)
+	}
+}
+
+func TestReservoirLoader_UsesMutatorForWorkerBatches(t *testing.T) {
+	conv := test.GetTestCoordinateConverterFactory()
+	ioFactory := NewFileIoFactory()
+	recorder := &recordingMutator{}
+	loader := NewReservoirLoader(conv, recorder, 100, 1, t.TempDir(), ioFactory, nil)
+
+	reader := &pc.MockLasReader{
+		CRS: "EPSG:4978",
+		Pts: []geom.Point64{
+			{Vector: model.Vector{X: 4399228.288985, Y: 855784.797006, Z: 0}},
+			{Vector: model.Vector{X: 4399238.288985, Y: 855784.797006, Z: 0}},
+			{Vector: model.Vector{X: 4399248.288985, Y: 855784.797006, Z: 0}},
+			{Vector: model.Vector{X: 4399258.288985, Y: 855784.797006, Z: 0}},
+			{Vector: model.Vector{X: 4399268.288985, Y: 855784.797006, Z: 0}},
+		},
+	}
+
+	result, err := loader.Run(reader, context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(result.tempFilePath) })
+
+	if result.totalPoints != 5 {
+		t.Fatalf("expected 5 points, got %d", result.totalPoints)
+	}
+	chunkSizes := recorder.snapshot()
+	hasWorkerBatch := false
+	for _, size := range chunkSizes {
+		if size > 1 {
+			hasWorkerBatch = true
+			break
+		}
+	}
+	if !hasWorkerBatch {
+		t.Fatalf("chunk sizes = %v, want at least one worker batch larger than one point", chunkSizes)
 	}
 }
