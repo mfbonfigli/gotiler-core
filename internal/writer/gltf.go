@@ -40,6 +40,11 @@ func init() {
 // padding after values narrower than 4 bytes.
 const gltfAttrByteStride = 4
 
+// gltfInterleavedStride is the per-vertex size of the interleaved
+// position+color buffer view written by modeler.WritePrimitiveAttributes:
+// [3]float32 position (12 bytes) plus [3]uint8 color padded to 4 bytes.
+const gltfInterleavedStride = 16
+
 // appendGenericVertexAccessor appends a SCALAR vertex attribute to the document.
 // raw holds count little-endian values already laid out with gltfAttrByteStride.
 func appendGenericVertexAccessor(doc *gltf.Document, col encoding.AttributeColumn, raw []byte, count int) (int, error) {
@@ -97,6 +102,12 @@ type GltfEncoder struct {
 	filename  string
 	coordPool *utils.SlicePool[[3]float32]
 	colorPool *utils.SlicePool[[3]uint8]
+	// attrColPool holds the stride-4 packed column buffers built for generic
+	// vertex attributes; bodyPool holds the GLB binary body buffer. Both are
+	// pooled for the same reason as coordPool/colorPool: Write runs once per
+	// tile and per-tile allocations of this size are measurable GC pressure.
+	attrColPool *utils.SlicePool[byte]
+	bodyPool    *utils.SlicePool[byte]
 }
 
 func (e *GltfEncoder) TilesetVersion() version.TilesetVersion {
@@ -109,9 +120,11 @@ func (e *GltfEncoder) ContentFilename() string {
 
 func NewGltfEncoder(filename string, attrs model.Attributes) *GltfEncoder {
 	return &GltfEncoder{
-		filename:  filename,
-		coordPool: utils.NewSlicePool[[3]float32](defaultGltfBufferCap),
-		colorPool: utils.NewSlicePool[[3]uint8](defaultGltfBufferCap),
+		filename:    filename,
+		coordPool:   utils.NewSlicePool[[3]float32](defaultGltfBufferCap),
+		colorPool:   utils.NewSlicePool[[3]uint8](defaultGltfBufferCap),
+		attrColPool: utils.NewSlicePool[byte](defaultGltfBufferCap * gltfAttrByteStride),
+		bodyPool:    utils.NewSlicePool[byte](defaultGltfBufferCap * (gltfInterleavedStride + 2*gltfAttrByteStride)),
 	}
 }
 
@@ -144,11 +157,20 @@ func (e *GltfEncoder) Write(node tree.Node, wp plugin.WriterProvider, prefix str
 	colors := *colorsPtr
 	defer e.colorPool.Put(colorsPtr)
 
-	// One stride-4 packed column per attribute; values narrower than 4 bytes
-	// keep their zero padding from the fresh allocation.
+	// Reserve the full GLB body up front so neither the modeler write below nor
+	// the per-attribute appends ever reallocate (and re-copy) the growing buffer.
+	bodyCap := n*gltfInterleavedStride + len(columns)*(n*gltfAttrByteStride+4) + 16
+	bodyPtr := e.bodyPool.GetWithMinCapacity(bodyCap)
+	defer e.bodyPool.Put(bodyPtr)
+	doc.Buffers = append(doc.Buffers, &gltf.Buffer{Data: (*bodyPtr)[:0]})
+
+	// One stride-4 packed column per attribute, drawn zeroed from the pool so
+	// values narrower than 4 bytes keep their zero padding.
 	columnData := make([][]byte, len(columns))
 	for i := range columns {
-		columnData[i] = make([]byte, n*gltfAttrByteStride)
+		colPtr := e.attrColPool.GetCleared(n * gltfAttrByteStride)
+		defer e.attrColPool.Put(colPtr)
+		columnData[i] = *colPtr
 	}
 
 	for i := 0; i < n; i++ {

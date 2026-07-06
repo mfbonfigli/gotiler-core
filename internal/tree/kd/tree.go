@@ -2,6 +2,7 @@ package kd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -32,7 +33,7 @@ const reservoirSizeDefault = 3_000_000
 const maxPointsPerLeafDefault = 50_000
 
 // maxLruCacheSize is the max number of open file descriptors during the initialize step
-const maxLruCacheSize = 393_216
+const maxLruCacheSize = 131_072
 
 // lodSelectFraction is the fraction of the root's points that go to each new child LOD node
 // (voxel-sampled). The remaining (1 - lodSelectFraction) stay as residuals in the root.
@@ -480,11 +481,16 @@ func (n *Node) initialize(r *reservoirLoaderResult, ctx context.Context, reporte
 	wg.Wait()
 	close(errChan)
 
-	// Flush all leaf writers via the LRU pool
-	n.config.writerPool.CloseAll()
+	// Flush all leaf writers via the LRU pool. A close failure means leaf data
+	// may have been silently truncated, so it must be surfaced as an error.
+	closeErr := n.config.writerPool.CloseAll()
 
+	var workerErr error
 	if len(errChan) > 0 {
-		return <-errChan
+		workerErr = <-errChan
+	}
+	if err := errors.Join(workerErr, closeErr); err != nil {
+		return err
 	}
 
 	tree.ReportProgress(reporter, tree.ProgressUpdate{
@@ -605,9 +611,14 @@ func (n *Node) bubbleUp(ctx context.Context, reporter tree.ProgressReporter) err
 
 // insertLODChain inserts synthetic LOD levels above the natural tree root until the root's
 // geometric error reaches lodTargetGeometricError. Each iteration:
-//  1. Voxel-samples lodSelectFraction of the root's current points → new child node Rx.
+//  1. Randomly samples lodSelectFraction of the root's current points → new child node Rx.
 //  2. Rx inherits the root's current children; root's new child becomes Rx.
 //  3. Root keeps the residual (1 - lodSelectFraction) points.
+//
+// In ADD mode the split is disjoint: Rx owns the selected points and the root keeps only
+// the residuals (rendering root+Rx together yields the full set). In REPLACE mode Rx must
+// stand alone when it replaces the root, so Rx keeps ALL the points and the root holds a
+// copy of the residual subset as a sparser preview — no points are lost on replacement.
 //
 // After k iterations the chain is: root → Rx_k → Rx_(k-1) → … → Rx_1 → original children.
 // Root.GE grows by 1/sqrt(1-lodSelectFraction) ≈ 2× per iteration (with the 3/4 fraction).
@@ -619,6 +630,7 @@ func (n *Node) insertLODChain(ctx context.Context) error {
 	n.isLeaf = false
 
 	targetGE := n.rootTargetGeometricError()
+	isAdd := n.config.refineMode == model.RefineAdd
 
 	for i := 0; i < 30 && n.rawGeometricError() < targetGE; i++ {
 		if err := ctx.Err(); err != nil {
@@ -643,7 +655,14 @@ func (n *Node) insertLODChain(ctx context.Context) error {
 			break
 		}
 
-		// Create Rx: inherits root's current children, owns the selected points.
+		// ADD: Rx owns only the selected points (disjoint split with the root).
+		// REPLACE: Rx keeps all the points; the root's residuals are a copy.
+		childPts := selected
+		if !isAdd {
+			childPts = pts
+		}
+
+		// Create Rx: inherits root's current children, owns the child points.
 		rx := &Node{
 			Mutex:         &sync.Mutex{},
 			bounds:        n.bounds,
@@ -652,13 +671,13 @@ func (n *Node) insertLODChain(ctx context.Context) error {
 			left:          n.left,
 			right:         n.right,
 		}
-		rxFilename, err := writePointsToTemp(selected, n.config, "lod_*.bin")
+		rxFilename, err := writePointsToTemp(childPts, n.config, "lod_*.bin")
 		if err != nil {
 			return fmt.Errorf("insertLODChain: write selected: %w", err)
 		}
 		rx.filename = rxFilename
-		rx.numPoints.Store(int64(len(selected)))
-		rx.totalPoints.Store(int64(len(selected))) // only > 0 check is used by the writer
+		rx.numPoints.Store(int64(len(childPts)))
+		rx.totalPoints.Store(int64(len(childPts))) // only > 0 check is used by the writer
 
 		// Update root: residuals only, single child = Rx.
 		os.Remove(n.filename)
@@ -761,10 +780,15 @@ func randomSplit(pts []model.Point, targetCount int) ([]model.Point, []model.Poi
 }
 
 // voxelSampleSplit selects approximately targetCount representative points from pts via
-// iterative voxel sampling. Returns (selected, residuals, error). Uses cfg pools for
+// iterative voxel sampling. Returns (selected, residuals, error). The residuals slice is
+// only built when collectResiduals is true (ADD mode); otherwise nil is returned to avoid
+// copying the unpicked points for nothing (REPLACE mode discards them). Uses cfg pools for
 // scratch space — must not be called concurrently on the same Config.
-func voxelSampleSplit(pts []model.Point, targetCount int, ctx context.Context, cfg *Config) ([]model.Point, []model.Point, error) {
+func voxelSampleSplit(pts []model.Point, targetCount int, collectResiduals bool, ctx context.Context, cfg *Config) ([]model.Point, []model.Point, error) {
 	if len(pts) == 0 || targetCount <= 0 {
+		if !collectResiduals {
+			return nil, nil, nil
+		}
 		cp := make([]model.Point, len(pts))
 		copy(cp, pts)
 		return nil, cp, nil
@@ -907,11 +931,14 @@ func voxelSampleSplit(pts []model.Point, targetCount int, ctx context.Context, c
 		}
 	}
 
-	// Build residuals from unpicked points.
-	residuals := make([]model.Point, 0, len(pts)-len(pickedPoints))
-	for i, pt := range pts {
-		if !globalPickedSet[i] {
-			residuals = append(residuals, pt)
+	// Build residuals from unpicked points (only needed in ADD mode).
+	var residuals []model.Point
+	if collectResiduals {
+		residuals = make([]model.Point, 0, len(pts)-len(pickedPoints))
+		for i, pt := range pts {
+			if !globalPickedSet[i] {
+				residuals = append(residuals, pt)
+			}
 		}
 	}
 
@@ -1008,7 +1035,7 @@ func (n *Node) processNode(ctx context.Context) error {
 			continue
 		}
 
-		selected, residuals, err := voxelSampleSplit(points, targetCount, ctx, cfg)
+		selected, residuals, err := voxelSampleSplit(points, targetCount, isAdd, ctx, cfg)
 		if err != nil {
 			cfg.pointPool.Put(pointsPtr)
 			return err
@@ -1232,14 +1259,10 @@ func buildKDTreeRecursive(points []model.Point, targetLeaves int, node *Node) {
 	axis := highestVarianceAxis(points)
 	node.axis = axis
 
-	// sort the coordinates according to that axis
-	sort.Slice(points, func(i, j int) bool {
-		return coordAtAxis(points[i], axis) < coordAtAxis(points[j], axis)
-	})
-
-	// split the points in two groups based on the median coordinate value on the split axis
-	// this creates two groups of roughly the same number of points
+	// partition the points around the median coordinate on the split axis: a full sort
+	// is not needed, only the median element and the two halves are used downstream
 	mid := len(points) / 2
+	selectKthAtAxis(points, mid, axis)
 	node.splitValue = coordAtAxis(points[mid], axis)
 
 	// left target is the number of leaves that should be created on the left branch, which is half of them
@@ -1253,6 +1276,63 @@ func buildKDTreeRecursive(points []model.Point, targetLeaves int, node *Node) {
 	buildKDTreeRecursive(points[:mid], leftTarget, node.left)
 	node.right = NewNode(node.localToGlobal, node.config)
 	buildKDTreeRecursive(points[mid:], rightTarget, node.right)
+}
+
+// selectKthAtAxis partially reorders points in place so that points[k] holds the element
+// with the k-th smallest coordinate on the given axis, every element in points[:k] has a
+// coordinate <= coordAtAxis(points[k], axis) and every element in points[k:] has a
+// coordinate >= it. It is a deterministic quickselect with a median-of-three pivot and a
+// three-way (Dutch national flag) partition, which keeps duplicate-heavy inputs at O(N)
+// instead of degrading quadratically.
+func selectKthAtAxis(points []model.Point, k int, axis uint8) {
+	lo, hi := 0, len(points)
+	for hi-lo > 1 {
+		pivot := medianOfThreeAtAxis(points, lo, hi, axis)
+
+		// Three-way partition of [lo, hi): [lo, lt) < pivot, [lt, gt) == pivot, [gt, hi) > pivot.
+		lt, gt := lo, hi
+		i := lo
+		for i < gt {
+			v := coordAtAxis(points[i], axis)
+			switch {
+			case v < pivot:
+				points[i], points[lt] = points[lt], points[i]
+				lt++
+				i++
+			case v > pivot:
+				gt--
+				points[i], points[gt] = points[gt], points[i]
+			default:
+				i++
+			}
+		}
+
+		switch {
+		case k < lt:
+			hi = lt
+		case k >= gt:
+			lo = gt
+		default:
+			return // k falls inside the run of elements equal to the pivot
+		}
+	}
+}
+
+// medianOfThreeAtAxis returns the median of the axis coordinates of the first, middle and
+// last points in [lo, hi). The result is always the coordinate of an actual element in the
+// range, guaranteeing the three-way partition makes progress.
+func medianOfThreeAtAxis(points []model.Point, lo, hi int, axis uint8) float64 {
+	a := coordAtAxis(points[lo], axis)
+	b := coordAtAxis(points[lo+(hi-lo)/2], axis)
+	c := coordAtAxis(points[hi-1], axis)
+	switch {
+	case (a <= b) == (b <= c):
+		return b
+	case (b <= a) == (a <= c):
+		return a
+	default:
+		return c
+	}
 }
 
 func highestVarianceAxis(pts []model.Point) uint8 {

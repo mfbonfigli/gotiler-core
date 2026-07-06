@@ -5,8 +5,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mfbonfigli/gotiler-core/internal/testtree"
 	"github.com/mfbonfigli/gotiler-core/tiler/geom"
@@ -43,6 +45,126 @@ func (fakeGeometryEncoder) ContentFilename() string {
 func (w *captureWriteCloser) Close() error {
 	w.closeFn(w.Bytes())
 	return nil
+}
+
+// failingGeometryEncoder fails on every Write call with the given error.
+type failingGeometryEncoder struct {
+	err error
+}
+
+func (e failingGeometryEncoder) Write(n tree.Node, wp plugin.WriterProvider, prefix string) error {
+	return e.err
+}
+
+func (failingGeometryEncoder) TilesetVersion() version.TilesetVersion {
+	return version.TilesetVersion_1_1
+}
+
+func (failingGeometryEncoder) ContentFilename() string {
+	return "fake.glb"
+}
+
+// panickingGeometryEncoder panics on every Write call.
+type panickingGeometryEncoder struct{}
+
+func (panickingGeometryEncoder) Write(n tree.Node, wp plugin.WriterProvider, prefix string) error {
+	panic("mock encoder panic")
+}
+
+func (panickingGeometryEncoder) TilesetVersion() version.TilesetVersion {
+	return version.TilesetVersion_1_1
+}
+
+func (panickingGeometryEncoder) ContentFilename() string {
+	return "fake.glb"
+}
+
+// manyTilesTree returns a tree with 1 root, 8 children and 64 grandchildren, all
+// with points, so that the producer emits 73 work units in total: enough to
+// exceed any small work channel buffer.
+func manyTilesTree() *testtree.MockNode {
+	newNode := func(children [8]tree.Node) *testtree.MockNode {
+		pt := &geom.LinkedPoint{
+			Pt: geom.NewPoint(1, 2, 3, 4, 5, 6),
+		}
+		return &testtree.MockNode{
+			TotalNumPts: 1,
+			Pts:         geom.NewLinkedPointStream(pt, 1),
+			ChildNodes:  children,
+		}
+	}
+	var children [8]tree.Node
+	for i := range 8 {
+		var grandChildren [8]tree.Node
+		for j := range 8 {
+			grandChildren[j] = newNode([8]tree.Node{})
+		}
+		children[i] = newNode(grandChildren)
+	}
+	root := newNode(children)
+	root.Root = true
+	return root
+}
+
+// writeWithWatchdog runs w.Write in a goroutine and fails the test if it does
+// not return within the given timeout, returning the Write error otherwise.
+func writeWithWatchdog(t *testing.T, w *StandardWriter, root tree.Tree, timeout time.Duration) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		done <- w.Write(root, "base", context.TODO(), nil)
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		t.Fatalf("Write did not return within %v: deadlock", timeout)
+		return nil
+	}
+}
+
+func TestWriterConsumerErrorOnFullChannelDoesNotDeadlock(t *testing.T) {
+	root := manyTilesTree()
+
+	w, err := NewWriter("base",
+		WithNumWorkers(1),
+		WithBufferRatio(1),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	w.consumerFunc = func() Consumer {
+		return NewStandardConsumer(WithGeometryEncoder(failingGeometryEncoder{err: fmt.Errorf("mock encode error")}))
+	}
+
+	err = writeWithWatchdog(t, w, root, 15*time.Second)
+	if err == nil {
+		t.Errorf("expected error but got none")
+	} else if !strings.Contains(err.Error(), "mock encode error") {
+		t.Errorf("expected error to contain the encoder error, got: %v", err)
+	}
+}
+
+func TestWriterConsumerPanicOnFullChannelDoesNotDeadlock(t *testing.T) {
+	root := manyTilesTree()
+
+	w, err := NewWriter("base",
+		WithNumWorkers(1),
+		WithBufferRatio(1),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	w.consumerFunc = func() Consumer {
+		return NewStandardConsumer(WithGeometryEncoder(panickingGeometryEncoder{}))
+	}
+
+	err = writeWithWatchdog(t, w, root, 15*time.Second)
+	if err == nil {
+		t.Errorf("expected error but got none")
+	} else if !strings.Contains(err.Error(), "panic") {
+		t.Errorf("expected error to contain the recovered panic, got: %v", err)
+	}
 }
 
 func (f *fakeWriterFinalizer) Finalize() error {
@@ -225,6 +347,77 @@ func TestWriterPropagatesFinalizerError(t *testing.T) {
 	}
 	if !finalizer.called {
 		t.Fatalf("expected finalizer to be called")
+	}
+}
+
+func TestWriterRunsFinalizerOnConsumerError(t *testing.T) {
+	root := manyTilesTree()
+
+	finalizer := &fakeWriterFinalizer{err: fmt.Errorf("mock finalizer error")}
+	w, err := NewWriter("base",
+		WithNumWorkers(1),
+		WithBufferRatio(10),
+		WithWriterFinalizer(finalizer),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	p := &MockProducer{}
+	c := &MockConsumer{
+		Err: fmt.Errorf("mock consumer error"),
+	}
+	w.producerFunc = func(wp plugin.WriterProvider) Producer {
+		return p
+	}
+	w.consumerFunc = func() Consumer {
+		return c
+	}
+	err = w.Write(root, "base", context.TODO(), nil)
+	if err == nil {
+		t.Fatalf("expected error but got none")
+	}
+	if !finalizer.called {
+		t.Errorf("expected finalizer to be called even when tile writing failed")
+	}
+	if !strings.Contains(err.Error(), "mock consumer error") {
+		t.Errorf("expected error to contain the consumer error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "mock finalizer error") {
+		t.Errorf("expected error to contain the finalizer error, got: %v", err)
+	}
+}
+
+func TestWriterJoinsAllWorkerErrors(t *testing.T) {
+	root := manyTilesTree()
+
+	w, err := NewWriter("base",
+		WithNumWorkers(1),
+		WithBufferRatio(10),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	p := &MockProducer{
+		Err: fmt.Errorf("mock producer error"),
+	}
+	c := &MockConsumer{
+		Err: fmt.Errorf("mock consumer error"),
+	}
+	w.producerFunc = func(wp plugin.WriterProvider) Producer {
+		return p
+	}
+	w.consumerFunc = func() Consumer {
+		return c
+	}
+	err = w.Write(root, "base", context.TODO(), nil)
+	if err == nil {
+		t.Fatalf("expected error but got none")
+	}
+	if !strings.Contains(err.Error(), "mock producer error") {
+		t.Errorf("expected error to contain the producer error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "mock consumer error") {
+		t.Errorf("expected error to contain the consumer error, got: %v", err)
 	}
 }
 

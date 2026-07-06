@@ -12,6 +12,7 @@ import (
 	"github.com/mfbonfigli/gotiler-core/internal/tree/kd"
 	"github.com/mfbonfigli/gotiler-core/internal/utils"
 	"github.com/mfbonfigli/gotiler-core/internal/writer"
+	coor "github.com/mfbonfigli/gotiler-core/tiler/coord"
 	"github.com/mfbonfigli/gotiler-core/tiler/model"
 	"github.com/mfbonfigli/gotiler-core/tiler/mutator"
 	"github.com/mfbonfigli/gotiler-core/tiler/pointcloud"
@@ -31,6 +32,45 @@ func (m requestingMutator) MutateChunk(chunk mutator.PointChunk, localToGlobal m
 }
 
 func (m requestingMutator) Close() error {
+	return nil
+}
+
+// countingMutator counts MutateChunk and Close invocations and records
+// whether it was invoked again after having been closed.
+type countingMutator struct {
+	mutateChunkCalls int
+	closeCalls       int
+	mutateAfterClose bool
+}
+
+func (m *countingMutator) RequiredAttributes() model.Attributes {
+	return nil
+}
+
+func (m *countingMutator) MutateChunk(chunk mutator.PointChunk, localToGlobal model.Transform) []model.Point {
+	m.mutateChunkCalls++
+	if m.closeCalls > 0 {
+		m.mutateAfterClose = true
+	}
+	return chunk.Points
+}
+
+func (m *countingMutator) Close() error {
+	m.closeCalls++
+	return nil
+}
+
+// mutatingMockNode is a MockNode whose Load invokes the mutator once,
+// mimicking what a real tree does while loading points.
+type mutatingMockNode struct {
+	testtree.MockNode
+}
+
+func (n *mutatingMockNode) Load(l pointcloud.Reader, c coor.ConverterFactory, m mutator.Mutator, ctx context.Context, reporter tree.ProgressReporter) error {
+	if err := n.MockNode.Load(l, c, m, ctx, reporter); err != nil {
+		return err
+	}
+	m.MutateChunk(mutator.PointChunk{Points: []model.Point{{}}}, model.IdentityTransform)
 	return nil
 }
 
@@ -248,5 +288,101 @@ func TestTilerProcessFolder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(files, expected) {
 		t.Errorf("expected files processed %v, got %v", expected, files)
+	}
+}
+
+func TestTilerProcessFolderReusesMutatorsAcrossFiles(t *testing.T) {
+	tiler, err := NewGoTiler()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	w := &writer.MockWriter{}
+	l := &pc.MockLasReader{}
+	m := &countingMutator{}
+	opts := NewDefaultTilerOptions()
+	opts.mutators = []mutator.Mutator{m}
+	c := context.TODO()
+	tiler.writerProvider = func(folder string, opts *TilerOptions) (writer.Writer, error) {
+		return w, nil
+	}
+	tiler.treeProvider = func(opts tree.Options, output string) tree.Tree {
+		return &mutatingMockNode{}
+	}
+	tiler.pointcloudReaderProvider = func(inputFiles []string, sourceCRS string, eightbit bool, attrs model.Attributes) (pointcloud.Reader, error) {
+		return l, nil
+	}
+
+	tmp, err := os.MkdirTemp(os.TempDir(), "tst")
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	t.Cleanup(func() {
+		os.RemoveAll(tmp)
+	})
+	utils.TouchFile(filepath.Join(tmp, "abc.las"))
+	utils.TouchFile(filepath.Join(tmp, "ghi.las"))
+	if err := tiler.ProcessFolder(tmp, "out", "EPSG:123", opts, c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.mutateChunkCalls != 2 {
+		t.Errorf("expected the mutator to be invoked for both files, got %d invocations", m.mutateChunkCalls)
+	}
+	if m.mutateAfterClose {
+		t.Errorf("mutator was invoked after having been closed")
+	}
+	if m.closeCalls != 1 {
+		t.Errorf("expected the mutator to be closed exactly once after the last file, got %d Close calls", m.closeCalls)
+	}
+}
+
+func TestTilerProcessFilesValidatesOptions(t *testing.T) {
+	testCases := []struct {
+		name    string
+		optFns  []tilerOptionsFn
+		wantErr bool
+	}{
+		{name: "valid defaults", optFns: nil, wantErr: false},
+		{name: "zero points per tile", optFns: []tilerOptionsFn{WithPointsPerTile(0)}, wantErr: true},
+		{name: "negative points per tile", optFns: []tilerOptionsFn{WithPointsPerTile(-1)}, wantErr: true},
+		{name: "zero workers", optFns: []tilerOptionsFn{WithWorkerNumber(0)}, wantErr: true},
+		{name: "negative workers", optFns: []tilerOptionsFn{WithWorkerNumber(-1)}, wantErr: true},
+		{name: "lowercase refine mode", optFns: []tilerOptionsFn{WithRefineMode(model.RefineMode("add"))}, wantErr: true},
+		{name: "garbage refine mode", optFns: []tilerOptionsFn{WithRefineMode(model.RefineMode("garbage"))}, wantErr: true},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tiler, err := NewGoTiler()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			w := &writer.MockWriter{}
+			tr := &testtree.MockNode{}
+			l := &pc.MockLasReader{}
+			readerCalled := false
+			tiler.writerProvider = func(folder string, opts *TilerOptions) (writer.Writer, error) {
+				return w, nil
+			}
+			tiler.treeProvider = func(opts tree.Options, output string) tree.Tree {
+				return tr
+			}
+			tiler.pointcloudReaderProvider = func(inputFiles []string, sourceCRS string, eightbit bool, attrs model.Attributes) (pointcloud.Reader, error) {
+				readerCalled = true
+				return l, nil
+			}
+			opts := NewTilerOptions(tc.optFns...)
+			err = tiler.ProcessFiles([]string{"abc.las"}, "out", "EPSG:123", opts, context.TODO())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got nil")
+				}
+				if readerCalled {
+					t.Errorf("expected validation to fail before any data is read")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }

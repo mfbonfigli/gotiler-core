@@ -510,6 +510,46 @@ func TestCloseAll_ErrorAggregation(t *testing.T) {
 	}
 }
 
+func TestWriteBatch_EvictionCloseError_SurfacesInCloseAll(t *testing.T) {
+	closeErr := errors.New("evicted close boom")
+	var writers []*mockPointWriter
+	var sliceMu sync.Mutex
+
+	pool := newLruWriterPool(1, func(name string) (PointWriter, error) {
+		sliceMu.Lock()
+		mw := &mockPointWriter{name: name}
+		if name == "a" {
+			mw.closeErr = closeErr
+		}
+		writers = append(writers, mw)
+		sliceMu.Unlock()
+		return mw, nil
+	})
+
+	_ = pool.WriteBatch("a", pt(1, 0, 0)) // a created
+	_ = pool.WriteBatch("b", pt(2, 0, 0)) // b created, a evicted, a.Close() fails
+
+	sliceMu.Lock()
+	aCloses := writers[0].closeCount()
+	sliceMu.Unlock()
+	if aCloses != 1 {
+		t.Fatalf("expected writer a to be closed on eviction, got %d closes", aCloses)
+	}
+
+	err := pool.CloseAll()
+	if err == nil {
+		t.Fatal("expected CloseAll to surface the eviction close error, got nil")
+	}
+	if !errors.Is(err, closeErr) {
+		t.Errorf("expected CloseAll error to wrap the eviction close error, got %v", err)
+	}
+
+	// A second CloseAll must not report the same error again.
+	if err := pool.CloseAll(); err != nil {
+		t.Errorf("expected nil error from second CloseAll, got %v", err)
+	}
+}
+
 func TestWriteBatch_MaxOpenZero(t *testing.T) {
 	pool, writers := newPoolWithMockFactory(0)
 

@@ -198,11 +198,37 @@ func (c *Colorizer) RequiredAttributes() model.Attributes {
 }
 
 func (c *Colorizer) MutateChunk(chunk PointChunk, localToGlobal model.Transform) []model.Point {
-	if c == nil {
+	if c == nil || len(chunk.Points) == 0 {
 		return chunk.Points
 	}
-	for i, pt := range chunk.Points {
-		chunk.Points[i] = c.mutatePoint(pt, chunk.AttributeView(i))
+	// the field-vs-attribute decision, the attribute lookup and the type
+	// dispatch are invariant across a chunk: resolve them once up front
+	// instead of re-evaluating them for every point.
+	if fieldValue := colorizerPointFieldGetter(c.attribute); fieldValue != nil {
+		for i := range chunk.Points {
+			value := fieldValue(chunk.Points[i])
+			if !isFinite(value) {
+				continue
+			}
+			c.colorizePoint(&chunk.Points[i], value)
+		}
+		return chunk.Points
+	}
+	layout := model.NewAttributeView(chunk.AttributeLayout, nil)
+	attrIndex := layout.Index(c.attribute)
+	if attrIndex < 0 {
+		return chunk.Points
+	}
+	extract := attributeFloat64Extractor(layout.Type(attrIndex))
+	if extract == nil {
+		return chunk.Points
+	}
+	for i := range chunk.Points {
+		value, ok := extract(chunk.AttributeView(i), attrIndex)
+		if !ok {
+			continue
+		}
+		c.colorizePoint(&chunk.Points[i], value)
 	}
 	return chunk.Points
 }
@@ -211,54 +237,29 @@ func (c *Colorizer) Close() error {
 	return nil
 }
 
-func (c *Colorizer) mutatePoint(pt model.Point, attrs model.AttributeView) model.Point {
-	if c == nil {
-		return pt
-	}
-	if value, ok := colorizerPointFieldValue(pt, c.attribute); ok {
-		if !isFinite(value) {
-			return pt
-		}
-		color := c.color(value)
-		pt.R = color.R
-		pt.G = color.G
-		pt.B = color.B
-		return pt
-	}
-	i := attrs.Index(c.attribute)
-	if i < 0 {
-		return pt
-	}
-	value, ok := attributeValueAsFloat64(attrs, i)
-	if !ok {
-		return pt
-	}
+func (c *Colorizer) colorizePoint(pt *model.Point, value float64) {
 	color := c.color(value)
 	pt.R = color.R
 	pt.G = color.G
 	pt.B = color.B
-	return pt
 }
 
 func colorizerPointField(attribute string) bool {
-	switch attribute {
-	case "x", "y", "z":
-		return true
-	default:
-		return false
-	}
+	return colorizerPointFieldGetter(attribute) != nil
 }
 
-func colorizerPointFieldValue(pt model.Point, attribute string) (float64, bool) {
+// colorizerPointFieldGetter returns a getter for the point field named by
+// attribute, or nil if the attribute does not name a point field.
+func colorizerPointFieldGetter(attribute string) func(model.Point) float64 {
 	switch attribute {
 	case "x":
-		return float64(pt.X), true
+		return func(pt model.Point) float64 { return float64(pt.X) }
 	case "y":
-		return float64(pt.Y), true
+		return func(pt model.Point) float64 { return float64(pt.Y) }
 	case "z":
-		return float64(pt.Z), true
+		return func(pt model.Point) float64 { return float64(pt.Z) }
 	default:
-		return 0, false
+		return nil
 	}
 }
 
@@ -285,46 +286,71 @@ func (c *Colorizer) color(value float64) Color {
 	return interpolateColor(c.colors[lo], c.colors[hi], t)
 }
 
-func attributeValueAsFloat64(attrs model.AttributeView, i int) (float64, bool) {
-	switch attrs.Type(i) {
+// attributeFloat64Extractor returns a function that reads the i-th attribute
+// of a view as a float64, or nil if the type is unsupported. The type dispatch
+// happens once here so the returned extractor can run in per-point hot loops.
+func attributeFloat64Extractor(typ model.AttributeType) func(attrs model.AttributeView, i int) (float64, bool) {
+	switch typ {
 	case model.AttributeInt8:
-		v, err := attrs.Int8(i)
-		return float64(v), err == nil
-	case model.AttributeUint8:
-		v, err := attrs.Uint8(i)
-		return float64(v), err == nil
-	case model.AttributeInt16:
-		v, err := attrs.Int16(i)
-		return float64(v), err == nil
-	case model.AttributeUint16:
-		v, err := attrs.Uint16(i)
-		return float64(v), err == nil
-	case model.AttributeInt32:
-		v, err := attrs.Int32(i)
-		return float64(v), err == nil
-	case model.AttributeUint32:
-		v, err := attrs.Uint32(i)
-		return float64(v), err == nil
-	case model.AttributeInt64:
-		v, err := attrs.Int64(i)
-		return float64(v), err == nil
-	case model.AttributeUint64:
-		v, err := attrs.Uint64(i)
-		return float64(v), err == nil
-	case model.AttributeBool:
-		v, err := attrs.Bool(i)
-		if v {
-			return 1, err == nil
+		return func(attrs model.AttributeView, i int) (float64, bool) {
+			v, err := attrs.Int8(i)
+			return float64(v), err == nil
 		}
-		return 0, err == nil
+	case model.AttributeUint8:
+		return func(attrs model.AttributeView, i int) (float64, bool) {
+			v, err := attrs.Uint8(i)
+			return float64(v), err == nil
+		}
+	case model.AttributeInt16:
+		return func(attrs model.AttributeView, i int) (float64, bool) {
+			v, err := attrs.Int16(i)
+			return float64(v), err == nil
+		}
+	case model.AttributeUint16:
+		return func(attrs model.AttributeView, i int) (float64, bool) {
+			v, err := attrs.Uint16(i)
+			return float64(v), err == nil
+		}
+	case model.AttributeInt32:
+		return func(attrs model.AttributeView, i int) (float64, bool) {
+			v, err := attrs.Int32(i)
+			return float64(v), err == nil
+		}
+	case model.AttributeUint32:
+		return func(attrs model.AttributeView, i int) (float64, bool) {
+			v, err := attrs.Uint32(i)
+			return float64(v), err == nil
+		}
+	case model.AttributeInt64:
+		return func(attrs model.AttributeView, i int) (float64, bool) {
+			v, err := attrs.Int64(i)
+			return float64(v), err == nil
+		}
+	case model.AttributeUint64:
+		return func(attrs model.AttributeView, i int) (float64, bool) {
+			v, err := attrs.Uint64(i)
+			return float64(v), err == nil
+		}
+	case model.AttributeBool:
+		return func(attrs model.AttributeView, i int) (float64, bool) {
+			v, err := attrs.Bool(i)
+			if v {
+				return 1, err == nil
+			}
+			return 0, err == nil
+		}
 	case model.AttributeFloat32:
-		v, err := attrs.Float32(i)
-		return float64(v), err == nil && isFinite(float64(v))
+		return func(attrs model.AttributeView, i int) (float64, bool) {
+			v, err := attrs.Float32(i)
+			return float64(v), err == nil && isFinite(float64(v))
+		}
 	case model.AttributeFloat64:
-		v, err := attrs.Float64(i)
-		return v, err == nil && isFinite(v)
+		return func(attrs model.AttributeView, i int) (float64, bool) {
+			v, err := attrs.Float64(i)
+			return v, err == nil && isFinite(v)
+		}
 	default:
-		return 0, false
+		return nil
 	}
 }
 

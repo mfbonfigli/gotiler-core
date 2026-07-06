@@ -1,6 +1,7 @@
 package pc
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -36,39 +37,98 @@ type CombinedPointCloudReader struct {
 	arena   model.AttributeValuesArena
 }
 
-// NewCombinedPointCloudReader creates a new file reader for the files passed as input. If crs is the empty string, the
-// reader will autodetect the CRS from the input files, however an error is returned if the CRS is not consistent across
-// all of them or if it's not found in the files.
+// NewCombinedPointCloudReader creates a new file reader for the files passed as input. If crs is the empty string,
+// each file's CRS is autodetected independently: an error is returned if the detected CRS are inconsistent across
+// files or if no file carries a detectable CRS; files without CRS metadata inherit the CRS detected from the others.
 // attrs lists the optional per-point attributes to emit; nil means none.
 func NewCombinedPointCloudReader(files []string, crs string, eightBitColor bool, attrs model.Attributes) (*CombinedPointCloudReader, error) {
 	r := &CombinedPointCloudReader{}
-	crsProvided := crs != ""
 	readerOpts := plugin.ReaderOptions{EightBitColor: eightBitColor, RequestedAttributes: attrs}
+	type input struct {
+		file    string
+		factory plugin.ReaderFactory
+	}
+	var inputs []input
 	for _, f := range files {
 		factory, ok := plugin.PointCloudReaderFactoryFor(f)
 		if !ok {
 			continue
 		}
-
-		fr, err := factory(f, crs, readerOpts)
-		if err != nil {
-			return nil, err
-		}
-
-		r.numPts += fr.NumberOfPoints()
-		r.readers = append(r.readers, fr)
-		if !crsProvided {
-			if crs != "" && crs != fr.GetCRS() {
-				return nil, fmt.Errorf("no CRS was provided and inconsistent CRS were detected:\n%s\n\n and\n\n%s", crs, fr.GetCRS())
+		inputs = append(inputs, input{file: f, factory: factory})
+	}
+	if len(inputs) == 0 {
+		return nil, fmt.Errorf("no supported point cloud files found; registered extensions: %v", plugin.SupportedPointCloudExtensions())
+	}
+	readers := make([]pointcloud.Reader, len(inputs))
+	closeAll := func() {
+		for _, fr := range readers {
+			if fr != nil {
+				fr.Close()
 			}
-			crs = fr.GetCRS()
 		}
 	}
-	if len(r.readers) == 0 {
-		return nil, fmt.Errorf("no supported point cloud files found; registered extensions: %v", plugin.SupportedPointCloudExtensions())
+	if crs != "" {
+		// the user provided a CRS: pass it to every factory, no autodetection
+		for i, in := range inputs {
+			fr, err := in.factory(in.file, crs, readerOpts)
+			if err != nil {
+				closeAll()
+				return nil, err
+			}
+			readers[i] = fr
+		}
+	} else {
+		// no CRS provided: let every reader autodetect its own, then check the
+		// detections are consistent. Readers may refuse to open a file lacking
+		// CRS metadata, so failed constructions are retried below with the CRS
+		// inherited from the other files.
+		openErrs := make([]error, len(inputs))
+		for i, in := range inputs {
+			fr, err := in.factory(in.file, "", readerOpts)
+			if err != nil {
+				openErrs[i] = err
+				continue
+			}
+			readers[i] = fr
+			detected := fr.GetCRS()
+			if detected == "" {
+				continue // no CRS in this file: it inherits the combined CRS
+			}
+			if crs == "" {
+				crs = detected
+			} else if crs != detected {
+				closeAll()
+				return nil, fmt.Errorf("no CRS was provided and inconsistent CRS were detected:\n%s\n\n and\n\n%s", crs, detected)
+			}
+		}
+		if crs == "" {
+			closeAll()
+			for _, err := range openErrs {
+				if err != nil {
+					return nil, err
+				}
+			}
+			return nil, fmt.Errorf("no CRS was provided and none could be detected from the input files")
+		}
+		for i, in := range inputs {
+			if readers[i] != nil {
+				continue
+			}
+			fr, err := in.factory(in.file, crs, readerOpts)
+			if err != nil {
+				closeAll()
+				return nil, err
+			}
+			readers[i] = fr
+		}
+	}
+	r.readers = readers
+	for _, fr := range readers {
+		r.numPts += fr.NumberOfPoints()
 	}
 	r.crs = crs
 	if err := r.buildAttributeRemaps(); err != nil {
+		closeAll()
 		return nil, err
 	}
 	return r, nil
@@ -150,9 +210,13 @@ func (m *CombinedPointCloudReader) GetNext() (geom.Point64, error) {
 		}
 		pt, err := m.readers[currReader].GetNext()
 		if err != nil {
-			// try to move on to the next reader
-			m.currentReader.CompareAndSwap(int32(currReader), int32(currReader)+1)
-			continue
+			if errors.Is(err, io.EOF) {
+				// reader exhausted: try to move on to the next reader
+				m.currentReader.CompareAndSwap(int32(currReader), int32(currReader)+1)
+				continue
+			}
+			// a real read error must be surfaced, not treated as end-of-file
+			return geom.Point64{}, err
 		}
 		if remap := m.remaps[currReader]; remap != nil {
 			// This file's schema differs from the combined one: rewrite the

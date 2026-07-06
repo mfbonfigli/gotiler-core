@@ -7,7 +7,10 @@ import (
 )
 
 // Pipeline is a mutator that applies all registered mutators sequentially
-// and returns the result as output
+// and returns the result as output. Like any Mutator, its MutateChunk may be
+// invoked concurrently from multiple goroutines, so the registered mutators
+// must be safe for concurrent use themselves. Closing the pipeline closes
+// all registered mutators.
 type Pipeline struct {
 	mutators []Mutator
 }

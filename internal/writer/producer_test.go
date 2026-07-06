@@ -128,7 +128,8 @@ func TestProduceWithCancelOk(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 	mockErr := fmt.Errorf("mock error")
-	ctx, _ := context.WithDeadlineCause(context.Background(), time.Now().Add(500*time.Millisecond), mockErr)
+	ctx, cancel := context.WithDeadlineCause(context.Background(), time.Now().Add(500*time.Millisecond), mockErr)
+	defer cancel()
 	time.Sleep(600 * time.Millisecond)
 	p.Produce(c, ec, wg, root, ctx)
 	wg.Wait()

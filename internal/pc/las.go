@@ -25,17 +25,24 @@ func init() {
 // golaz.Reader is not goroutine-safe, so all reads are serialised with mu while keeping a reusable
 // scan buffer to avoid per-point allocations.
 // lasExtraAttr is one requested extra-byte attribute, resolved once at
-// construction so the per-point path does no name canonicalization.
+// construction so the per-point path does no name canonicalization, no
+// descriptor map lookup and no interface boxing: the raw little-endian bytes
+// are located directly within the point's extra-bytes section.
 type lasExtraAttr struct {
-	descName   string // name as spelled in the LAS extra-byte descriptor
 	outputName string // canonical requested name to emit
 	typ        model.AttributeType
+	// rawTyp is the type of the value as stored in the file; it differs from
+	// typ only for scaled attributes (which are emitted as float64).
+	rawTyp model.AttributeType
 	// scaled is true when the descriptor defines a scale and/or offset: the
 	// stored value is quantized and the actual value is raw*scale+offset,
 	// emitted as float64 (typ is AttributeFloat64 in that case).
 	scaled bool
 	scale  float64
 	offset float64
+	// position of the raw value within the point's extra-bytes section
+	srcOff  int
+	srcSize int
 	// packed layout position within the point's AttributeValues
 	blobOff  int
 	blobSize int
@@ -209,7 +216,13 @@ func (f *GoLasReader) buildExtraAttrPlan() []lasExtraAttr {
 			continue
 		}
 		planned[outputName] = struct{}{}
-		ea := lasExtraAttr{descName: desc.Name, outputName: outputName, typ: t}
+		ea := lasExtraAttr{
+			outputName: outputName,
+			typ:        t,
+			rawTyp:     t,
+			srcOff:     int(desc.ByteOffset),
+			srcSize:    int(desc.ByteSize),
+		}
 		if desc.HasScale || desc.HasOffset {
 			ea.scaled = true
 			ea.typ = model.AttributeFloat64
@@ -324,7 +337,7 @@ func (f *GoLasReader) buildSchema() {
 		{model.AttrScannerChannel, model.AttributeUint8, extended, &p.scannerChannel},
 		{model.AttrWavePacketDescriptorIndex, model.AttributeUint8, wave, &p.wavePacketDescriptorIndex},
 		{model.AttrWaveformDataOffset, model.AttributeUint64, wave, &p.waveformDataOffset},
-		{model.AttrReturnPointWaveformLocation, model.AttributeUint32, wave, &p.waveformPacketSize},
+		{model.AttrWaveformPacketSize, model.AttributeUint32, wave, &p.waveformPacketSize},
 		{model.AttrReturnPointWaveformLocation, model.AttributeFloat32, wave, &p.returnPointWaveformLocation},
 		{model.AttrWaveformXT, model.AttributeFloat32, wave, &p.waveformXT},
 		{model.AttrWaveformYT, model.AttributeFloat32, wave, &p.waveformYT},
@@ -463,52 +476,53 @@ func (f *GoLasReader) encodeAttributesLocked() model.AttributeValues {
 			}
 		}
 	}
-	for i := range f.extraAttrs {
-		ea := &f.extraAttrs[i]
-		value, err := f.r.ExtraByte(&f.scanBuf, ea.descName)
-		if err != nil {
-			continue // leave zeros
-		}
-		if ea.scaled {
-			raw, ok := extraByteAsFloat64(value)
-			if !ok {
+	if len(f.extraAttrs) > 0 {
+		eb := f.scanBuf.ExtraBytes()
+		for i := range f.extraAttrs {
+			ea := &f.extraAttrs[i]
+			if ea.srcOff+ea.srcSize > len(eb) {
+				continue // extra bytes absent or truncated: leave zeros
+			}
+			src := eb[ea.srcOff : ea.srcOff+ea.srcSize]
+			if ea.scaled {
+				raw := lasRawExtraFloat64(src, ea.rawTyp)
+				binary.LittleEndian.PutUint64(blob[ea.blobOff:], math.Float64bits(raw*ea.scale+ea.offset))
 				continue
 			}
-			binary.LittleEndian.PutUint64(blob[ea.blobOff:], math.Float64bits(raw*ea.scale+ea.offset))
-			continue
+			// LAS extra bytes are little-endian scalars, exactly the packed
+			// attribute encoding for the same type: copy the raw bytes as-is.
+			copy(blob[ea.blobOff:ea.blobOff+ea.blobSize], src)
 		}
-		// golaz boxes the extra-byte scalar; decode it via the generic encoder.
-		_ = model.EncodeAttributeValue(blob[ea.blobOff:ea.blobOff+ea.blobSize], ea.typ, value)
 	}
 	return blob
 }
 
-// extraByteAsFloat64 converts a raw extra-byte scalar (any of the ten LAS 1.4
-// scalar types as returned by golaz) to float64 for scale/offset application.
-func extraByteAsFloat64(v any) (float64, bool) {
-	switch n := v.(type) {
-	case uint8:
-		return float64(n), true
-	case int8:
-		return float64(n), true
-	case uint16:
-		return float64(n), true
-	case int16:
-		return float64(n), true
-	case uint32:
-		return float64(n), true
-	case int32:
-		return float64(n), true
-	case uint64:
-		return float64(n), true
-	case int64:
-		return float64(n), true
-	case float32:
-		return float64(n), true
-	case float64:
-		return n, true
+// lasRawExtraFloat64 decodes a raw little-endian extra-byte scalar to float64
+// for scale/offset application. src must be exactly the scalar's size.
+func lasRawExtraFloat64(src []byte, t model.AttributeType) float64 {
+	switch t {
+	case model.AttributeUint8:
+		return float64(src[0])
+	case model.AttributeInt8:
+		return float64(int8(src[0]))
+	case model.AttributeUint16:
+		return float64(binary.LittleEndian.Uint16(src))
+	case model.AttributeInt16:
+		return float64(int16(binary.LittleEndian.Uint16(src)))
+	case model.AttributeUint32:
+		return float64(binary.LittleEndian.Uint32(src))
+	case model.AttributeInt32:
+		return float64(int32(binary.LittleEndian.Uint32(src)))
+	case model.AttributeUint64:
+		return float64(binary.LittleEndian.Uint64(src))
+	case model.AttributeInt64:
+		return float64(int64(binary.LittleEndian.Uint64(src)))
+	case model.AttributeFloat32:
+		return float64(math.Float32frombits(binary.LittleEndian.Uint32(src)))
+	case model.AttributeFloat64:
+		return math.Float64frombits(binary.LittleEndian.Uint64(src))
 	default:
-		return 0, false
+		return 0
 	}
 }
 

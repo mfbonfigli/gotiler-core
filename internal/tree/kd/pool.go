@@ -14,6 +14,9 @@ type lruWriterPool struct {
 	newWriter func(name string) (PointWriter, error)
 	entries   map[string]*list.Element
 	lru       *list.List
+	// evictErr accumulates errors from writers closed on LRU eviction so that
+	// no flush/close failure is silently dropped; CloseAll surfaces (and resets) it.
+	evictErr error
 }
 
 type poolEntry struct {
@@ -73,11 +76,16 @@ func (p *lruWriterPool) WriteBatch(name string, points []model.Point) error {
 			}
 		}
 
-		// If an eligible item was found, close it outside the lock
+		// If an eligible item was found, close it outside the lock.
+		// A close failure means the flush may have been lost: record it so
+		// CloseAll surfaces it instead of silently dropping it.
 		if evictedW != nil {
 			p.mu.Unlock()
-			_ = evictedW.Close() // Error handled or logged here
+			closeErr := evictedW.Close()
 			p.mu.Lock()
+			if closeErr != nil {
+				p.evictErr = errors.Join(p.evictErr, closeErr)
+			}
 		}
 	}
 
@@ -123,6 +131,10 @@ func (p *lruWriterPool) CloseAll() error {
 	defer p.mu.Unlock()
 
 	var errs []error
+	if p.evictErr != nil {
+		errs = append(errs, p.evictErr)
+		p.evictErr = nil
+	}
 	for _, elem := range p.entries {
 		entry := elem.Value.(*poolEntry)
 		if err := entry.writer.Close(); err != nil {

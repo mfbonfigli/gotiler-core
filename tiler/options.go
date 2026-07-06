@@ -59,6 +59,28 @@ func NewTilerOptions(optFn ...tilerOptionsFn) *TilerOptions {
 	return opts
 }
 
+// validate checks that the effective option values are usable before any point
+// cloud data is read. Some options (e.g. PointsPerTile) are exported fields that
+// can be set directly, so they are validated at process time rather than only
+// when applying option functions.
+func (opts *TilerOptions) validate() error {
+	if err := opts.validateEncoder(); err != nil {
+		return err
+	}
+	if opts.PointsPerTile <= 0 {
+		return fmt.Errorf("points per tile must be greater than zero, got %d", opts.PointsPerTile)
+	}
+	if opts.numWorkers <= 0 {
+		return fmt.Errorf("number of workers must be greater than zero, got %d", opts.numWorkers)
+	}
+	switch opts.refineMode {
+	case model.RefineAdd, model.RefineReplace:
+	default:
+		return fmt.Errorf("unsupported refine mode %q; supported modes: %q, %q", opts.refineMode, model.RefineAdd, model.RefineReplace)
+	}
+	return nil
+}
+
 func (opts *TilerOptions) validateEncoder() error {
 	factory, ok := plugin.GeometryEncoderFactoryFor(opts.encoderID)
 	if !ok {

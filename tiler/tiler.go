@@ -108,14 +108,23 @@ func NewGoTiler() (*GoTiler, error) {
 // ProcessFolder converts all point cloud files found in the provided input folder converting them into separate tilesets
 // each tileset is stored in a subdirectory in the outputFolder named after the filename.
 // If sourceCRS is left empty, the CRS will attempted to be autodetected from point cloud GeoTIFF or WKT VLRs.
-func (t *GoTiler) ProcessFolder(inputFolder, outputFolder string, sourceCRS string, opts *TilerOptions, ctx context.Context) error {
+func (t *GoTiler) ProcessFolder(inputFolder, outputFolder string, sourceCRS string, opts *TilerOptions, ctx context.Context) (err error) {
 	files, err := utils.FindPointCloudFilesInFolder(inputFolder)
 	if err != nil {
 		return err
 	}
+	// a single pipeline is shared across all files and closed once
+	// when the whole folder has been processed
+	mutatorPipeline := mutator.NewPipeline(opts.mutators...)
+	defer func() {
+		closeErr := mutatorPipeline.Close()
+		if err == nil {
+			err = closeErr
+		}
+	}()
 	for _, f := range files {
 		subfolderName := strings.TrimSuffix(filepath.Base(f), filepath.Ext(f))
-		err := t.ProcessFiles([]string{f}, filepath.Join(outputFolder, subfolderName), sourceCRS, opts, ctx)
+		err := t.processFiles([]string{f}, filepath.Join(outputFolder, subfolderName), sourceCRS, opts, mutatorPipeline, ctx)
 		if err != nil {
 			return err
 		}
@@ -125,8 +134,15 @@ func (t *GoTiler) ProcessFolder(inputFolder, outputFolder string, sourceCRS stri
 
 // ProcessFiles converts the specified point cloud files as a single 3D Tiles tileset and stores them in the given output folder.
 // If sourceCRS is left empty, the CRS will attempted to be autodetected from LAS GeoTIFF or WKT VLRs if processing LAS files and the field is available.
-func (t *GoTiler) ProcessFiles(inputFiles []string, outputFolder string, sourceCRS string, opts *TilerOptions, ctx context.Context) error {
-	return t.processFiles(inputFiles, outputFolder, sourceCRS, opts, ctx)
+func (t *GoTiler) ProcessFiles(inputFiles []string, outputFolder string, sourceCRS string, opts *TilerOptions, ctx context.Context) (err error) {
+	mutatorPipeline := mutator.NewPipeline(opts.mutators...)
+	defer func() {
+		closeErr := mutatorPipeline.Close()
+		if err == nil {
+			err = closeErr
+		}
+	}()
+	return t.processFiles(inputFiles, outputFolder, sourceCRS, opts, mutatorPipeline, ctx)
 }
 
 // buildPhaseMap constructs a phase map from the tree's declared phases.
@@ -145,19 +161,14 @@ func buildPhaseMap(tr tree.Tree) map[string]Phase {
 	return phases
 }
 
-func (t *GoTiler) processFiles(inputFiles []string, outputFolder string, sourceCRS string, opts *TilerOptions, ctx context.Context) (err error) {
+// processFiles runs a single tiling operation. The mutator pipeline is owned by the
+// caller, which is responsible for closing it once the whole operation completes.
+func (t *GoTiler) processFiles(inputFiles []string, outputFolder string, sourceCRS string, opts *TilerOptions, mutatorPipeline *mutator.Pipeline, ctx context.Context) (err error) {
 	start := time.Now()
 	provider := t.treeProvider
 	if opts.treeProvider != nil {
 		provider = opts.treeProvider
 	}
-	mutatorPipeline := mutator.NewPipeline(opts.mutators...)
-	defer func() {
-		closeErr := mutatorPipeline.Close()
-		if err == nil {
-			err = closeErr
-		}
-	}()
 	inputAttributes := mergeAttributes(opts.attributes, mutatorPipeline.RequiredAttributes())
 	tr := provider(treeOptions(opts, inputAttributes), outputFolder)
 	defer tr.Dispose()
@@ -178,11 +189,11 @@ func (t *GoTiler) processFiles(inputFiles []string, outputFolder string, sourceC
 		Message:     "reading file headers",
 		IsMilestone: true,
 	})
-	if err := opts.validateEncoder(); err != nil {
+	if err := opts.validate(); err != nil {
 		tree.ReportProgress(reporter, tree.ProgressUpdate{
 			Phase:       "preparation",
 			Percent:     -1,
-			Message:     fmt.Sprintf("encoder error: %v", err),
+			Message:     fmt.Sprintf("invalid options: %v", err),
 			IsMilestone: true,
 		})
 		return err

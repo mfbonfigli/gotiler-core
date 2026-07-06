@@ -3,6 +3,7 @@ package writer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"path"
@@ -235,8 +236,20 @@ func (w *StandardWriter) Write(t tree.Tree, folderName string, ctx context.Conte
 	close(errorChannel)
 	errorWaitGroup.Wait()
 
+	// runFinalizers runs all registered finalizers joining their errors. Finalizers must run
+	// even when tile writing failed, e.g. to release resources held by output plugins.
+	runFinalizers := func() error {
+		var err error
+		for _, finalizer := range w.writerFinalizers {
+			err = errors.Join(err, finalizer.Finalize())
+		}
+		return err
+	}
+
 	if len(errs) != 0 {
-		return errs[0]
+		// tile writing failed: do not write the tileset.json for a failed export but still
+		// run the finalizers, joining all collected errors with theirs
+		return errors.Join(errors.Join(errs...), runFinalizers())
 	}
 
 	if val := ctx.Value("IS_TEST"); val != nil && val.(bool) {
@@ -245,14 +258,11 @@ func (w *StandardWriter) Write(t tree.Tree, folderName string, ctx context.Conte
 		return nil
 	}
 
-	err := w.writeSquashedTileset(t, rootWriterProvider)
-	if err != nil {
-		return err
+	if err := w.writeSquashedTileset(t, rootWriterProvider); err != nil {
+		return errors.Join(err, runFinalizers())
 	}
-	for _, finalizer := range w.writerFinalizers {
-		if err := finalizer.Finalize(); err != nil {
-			return err
-		}
+	if err := runFinalizers(); err != nil {
+		return err
 	}
 
 	tree.ReportProgress(reporter, tree.ProgressUpdate{

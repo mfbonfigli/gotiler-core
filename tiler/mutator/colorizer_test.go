@@ -270,6 +270,24 @@ func TestColorizerSupportsAllAttributeTypes(t *testing.T) {
 	}
 }
 
+func BenchmarkColorizerMutateChunkAttribute(b *testing.B) {
+	c, err := NewColorizerWithGradient(model.AttrIntensity, 0, 100, testLinearGradient())
+	if err != nil {
+		b.Fatalf("NewColorizerWithGradient: %v", err)
+	}
+	attrs := colorizerView(model.AttrIntensity, model.AttributeUint16, uint16(50))
+	points := make([]model.Point, 1024)
+	for i := range points {
+		points[i] = geom.NewPoint(0, 0, 0, 1, 2, 3)
+		points[i].Attributes = attrs.values
+	}
+	chunk := PointChunk{Points: points, AttributeLayout: attrs.layout}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		c.MutateChunk(chunk, model.IdentityTransform)
+	}
+}
+
 func testLinearGradient() ColorGradientScale {
 	return ColorGradientScale{
 		Nums:              []float64{0, 1},

@@ -21,9 +21,15 @@ type Mutator interface {
 	//
 	// Implementations may mutate chunk.Points in place and should return the
 	// kept points, usually as a subslice of chunk.Points.
+	//
+	// MutateChunk may be invoked concurrently from multiple goroutines on the
+	// same instance: implementations must be safe for concurrent use, and any
+	// internal state requires synchronization. Chunks never overlap, so mutating
+	// chunk.Points in place is safe without locking.
 	MutateChunk(chunk PointChunk, localToGlobal model.Transform) []model.Point
 
-	// Close releases resources held by the mutator.
+	// Close releases resources held by the mutator. It is called once by the
+	// tiler after all mutation work completes.
 	Close() error
 }
 
