@@ -61,17 +61,8 @@ var (
 			},
 			InterpolationMode: GradientInterpolationLinear,
 		},
-		"viridis": {
-			Nums: []float64{0, 0.25, 0.5, 0.75, 1},
-			Colors: []Color{
-				{R: 68, G: 1, B: 84},
-				{R: 59, G: 82, B: 139},
-				{R: 33, G: 145, B: 140},
-				{R: 94, G: 201, B: 98},
-				{R: 253, G: 231, B: 37},
-			},
-			InterpolationMode: GradientInterpolationLinear,
-		},
+		// viridis, magma, inferno, plasma, cividis and turbo are registered
+		// from their canonical 256-entry lookup tables in gradients.go.
 		"las-classification": {
 			Nums: []float64{
 				0,
@@ -153,29 +144,105 @@ func RegisteredColorGradient(alias string) (ColorGradientScale, bool) {
 	return cloneColorGradient(gradient), true
 }
 
+// colorizerOptions holds the rendering settings configured through
+// ColorizerOption values.
+type colorizerOptions struct {
+	stretchLow  float64
+	stretchHigh float64
+	reverse     bool
+	steps       int
+	blend       float64
+}
+
+func defaultColorizerOptions() colorizerOptions {
+	return colorizerOptions{
+		stretchLow:  2,
+		stretchHigh: 98,
+		blend:       1,
+	}
+}
+
+// ColorizerOption configures how a Colorizer renders the gradient.
+type ColorizerOption func(*colorizerOptions) error
+
+// WithStretch sets the percentile stretch used to derive the color range from
+// the data: the gradient is scaled between the pLow-th and pHigh-th
+// percentiles of the observed values, and values outside saturate to the end
+// colors. The default is (2, 98), which keeps outliers from washing out the
+// ramp. Use WithStretch(0, 100) for a plain min/max scale. Ignored by
+// gradients that declare a FixedRange.
+func WithStretch(pLow, pHigh float64) ColorizerOption {
+	return func(o *colorizerOptions) error {
+		if !isFinite(pLow) || !isFinite(pHigh) || pLow < 0 || pHigh > 100 || pLow >= pHigh {
+			return fmt.Errorf("stretch percentiles must satisfy 0 <= low < high <= 100, got (%v, %v)", pLow, pHigh)
+		}
+		o.stretchLow = pLow
+		o.stretchHigh = pHigh
+		return nil
+	}
+}
+
+// WithReverse reverses the gradient's color order.
+func WithReverse() ColorizerOption {
+	return func(o *colorizerOptions) error {
+		o.reverse = true
+		return nil
+	}
+}
+
+// WithSteps quantizes the gradient into n discrete color bands.
+func WithSteps(n int) ColorizerOption {
+	return func(o *colorizerOptions) error {
+		if n < 2 {
+			return fmt.Errorf("steps must be at least 2, got %d", n)
+		}
+		o.steps = n
+		return nil
+	}
+}
+
+// WithBlend blends the gradient color with the point's original color:
+// 1 (the default) fully replaces the original color, 0.5 mixes them evenly.
+func WithBlend(alpha float64) ColorizerOption {
+	return func(o *colorizerOptions) error {
+		if !isFinite(alpha) || alpha <= 0 || alpha > 1 {
+			return fmt.Errorf("blend must be in (0, 1], got %v", alpha)
+		}
+		o.blend = alpha
+		return nil
+	}
+}
+
 // Colorizer colors points using a numeric per-point attribute or a local
 // point coordinate (x, y or z). The value range is derived from the data:
-// during loading it observes the attribute's min and max without touching the
-// points, then colors the points as tiles are written, scaling the gradient
-// over the observed range. Gradients that declare a FixedRange (like
-// las-classification, whose stops encode absolute class codes) are never
-// rescaled to the data: their declared range is used as is. Because colors
-// are applied only at write time, the RGB values stored in the tree keep
-// their source values.
+// during loading it observes the attribute's value distribution without
+// touching the points, then colors the points as tiles are written, scaling
+// the gradient between the observed 2nd and 98th percentiles (configurable
+// through WithStretch) so that outliers do not wash out the ramp. Gradients
+// that declare a FixedRange (like las-classification, whose stops encode
+// absolute class codes) are never rescaled to the data: their declared range
+// is used as is. Because colors are applied only at write time, the RGB
+// values stored in the tree keep their source values.
 type Colorizer struct {
 	attribute string
 	gradient  ColorGradientScale
+	blend     float64
+	pLow      float64
+	pHigh     float64
 
 	// fixed is the mapping built upfront when the gradient declares a
 	// FixedRange; observation and run resets are skipped entirely then.
 	fixed *colorMapping
 
-	// mu guards the observed range and the phase transitions; frozen holds the
-	// write-time mapping so MutateChunkOnWrite can run lock-free once built.
+	// mu guards the observed range, the quantile estimators and the phase
+	// transitions; frozen holds the write-time mapping so MutateChunkOnWrite
+	// can run lock-free once built.
 	mu     sync.Mutex
 	min    float64
 	max    float64
 	seen   bool
+	qLow   *quantileEstimator // nil when pLow is 0
+	qHigh  *quantileEstimator // nil when pHigh is 100
 	frozen atomic.Pointer[frozenMapping]
 }
 
@@ -187,17 +254,17 @@ type frozenMapping struct {
 }
 
 // NewColorizer creates a Colorizer from a registered gradient alias.
-func NewColorizer(attributeName, gradientAlias string) (*Colorizer, error) {
+func NewColorizer(attributeName, gradientAlias string, opts ...ColorizerOption) (*Colorizer, error) {
 	gradient, ok := RegisteredColorGradient(gradientAlias)
 	if !ok {
 		return nil, fmt.Errorf("unknown color gradient %q", gradientAlias)
 	}
-	return NewColorizerWithGradient(attributeName, gradient)
+	return NewColorizerWithGradient(attributeName, gradient, opts...)
 }
 
 // NewColorizerWithGradient creates a Colorizer using an explicit gradient
 // definition.
-func NewColorizerWithGradient(attributeName string, gradient ColorGradientScale) (*Colorizer, error) {
+func NewColorizerWithGradient(attributeName string, gradient ColorGradientScale, opts ...ColorizerOption) (*Colorizer, error) {
 	attribute := model.CanonicalAttributeName(attributeName)
 	if attribute == "" {
 		return nil, fmt.Errorf("attribute name cannot be empty")
@@ -205,18 +272,81 @@ func NewColorizerWithGradient(attributeName string, gradient ColorGradientScale)
 	if err := validateColorGradient(gradient); err != nil {
 		return nil, err
 	}
+	options := defaultColorizerOptions()
+	for _, opt := range opts {
+		if err := opt(&options); err != nil {
+			return nil, err
+		}
+	}
+	gradient = cloneColorGradient(gradient)
+	if options.reverse {
+		gradient = reversedGradient(gradient)
+	}
+	if options.steps > 0 {
+		gradient = steppedGradient(gradient, options.steps)
+	}
 	c := &Colorizer{
 		attribute: attribute,
-		gradient:  cloneColorGradient(gradient),
+		gradient:  gradient,
+		blend:     options.blend,
+		pLow:      options.stretchLow,
+		pHigh:     options.stretchHigh,
 	}
 	if gradient.FixedRange {
-		fixed, err := newColorMapping(attribute, gradient.RangeMin, gradient.RangeMax, gradient)
+		fixed, err := newColorMapping(attribute, gradient.RangeMin, gradient.RangeMax, gradient, c.blend)
 		if err != nil {
 			return nil, err
 		}
 		c.fixed = fixed
+		return c, nil
+	}
+	if c.pLow > 0 {
+		c.qLow = newQuantileEstimator(c.pLow / 100)
+	}
+	if c.pHigh < 100 {
+		c.qHigh = newQuantileEstimator(c.pHigh / 100)
 	}
 	return c, nil
+}
+
+// reversedGradient returns the gradient with the color order reversed.
+func reversedGradient(g ColorGradientScale) ColorGradientScale {
+	n := len(g.Nums)
+	nums := make([]float64, n)
+	colors := make([]Color, n)
+	for i := 0; i < n; i++ {
+		nums[i] = 1 - g.Nums[n-1-i]
+		colors[i] = g.Colors[n-1-i]
+	}
+	out := g
+	out.Nums = nums
+	out.Colors = colors
+	return out
+}
+
+// steppedGradient quantizes the gradient into n discrete bands, sampling each
+// band's color at its center.
+func steppedGradient(g ColorGradientScale, n int) ColorGradientScale {
+	// sample the gradient in normalized [0, 1] space
+	sampler, err := newColorMapping("", 0, 1, g, 1)
+	if err != nil {
+		// gradient is already validated, so this cannot happen
+		return g
+	}
+	nums := make([]float64, n+1)
+	colors := make([]Color, n+1)
+	for k := 0; k < n; k++ {
+		nums[k] = float64(k) / float64(n)
+		colors[k] = sampler.color((float64(k) + 0.5) / float64(n))
+	}
+	// flat interpolation requires a final stop at 1; it repeats the last band
+	nums[n] = 1
+	colors[n] = colors[n-1]
+	out := g
+	out.Nums = nums
+	out.Colors = colors
+	out.InterpolationMode = GradientInterpolationFlat
+	return out
 }
 
 func (c *Colorizer) RequiredAttributes() model.Attributes {
@@ -229,19 +359,57 @@ func (c *Colorizer) RequiredAttributes() model.Attributes {
 	return model.NewAttributes(c.attribute)
 }
 
-// MutateChunk observes the attribute's range and returns the points unchanged.
-// Gradients with a fixed range need no observation, so it is a no-op for them.
+// colorizerValuePool recycles the chunk-local value buffers used to feed the
+// quantile estimators without holding the mutex during attribute extraction.
+var colorizerValuePool = sync.Pool{
+	New: func() any {
+		buf := make([]float64, 0, 4096)
+		return &buf
+	},
+}
+
+// MutateChunk observes the attribute's value distribution and returns the
+// points unchanged. Gradients with a fixed range need no observation, so it
+// is a no-op for them.
 func (c *Colorizer) MutateChunk(chunk PointChunk, localToGlobal model.Transform) []model.Point {
 	if c == nil || c.fixed != nil {
 		return chunk.Points
 	}
-	mn, mx, ok := chunkValueRange(c.attribute, chunk)
+	// extract the values chunk-locally, without holding the lock; the values
+	// are buffered only when quantile estimators need them
+	needValues := c.qLow != nil || c.qHigh != nil
+	var bufPtr *[]float64
+	var values []float64
+	if needValues {
+		bufPtr = colorizerValuePool.Get().(*[]float64)
+		values = (*bufPtr)[:0]
+	}
+	mn, mx, ok := math.Inf(1), math.Inf(-1), false
+	forEachChunkValue(c.attribute, chunk, func(v float64) {
+		if v < mn {
+			mn = v
+		}
+		if v > mx {
+			mx = v
+		}
+		ok = true
+		if needValues {
+			values = append(values, v)
+		}
+	})
+
 	c.mu.Lock()
 	// A read call after write calls means a new tiling run started: discard
-	// the previous run's range and mapping before observing.
+	// the previous run's range, estimators and mapping before observing.
 	if c.frozen.Load() != nil {
 		c.frozen.Store(nil)
 		c.seen = false
+		if c.qLow != nil {
+			c.qLow.reset()
+		}
+		if c.qHigh != nil {
+			c.qHigh.reset()
+		}
 	}
 	if ok {
 		if !c.seen {
@@ -255,8 +423,21 @@ func (c *Colorizer) MutateChunk(chunk PointChunk, localToGlobal model.Transform)
 				c.max = mx
 			}
 		}
+		for _, v := range values {
+			if c.qLow != nil {
+				c.qLow.add(v)
+			}
+			if c.qHigh != nil {
+				c.qHigh.add(v)
+			}
+		}
 	}
 	c.mu.Unlock()
+
+	if bufPtr != nil {
+		*bufPtr = values[:0]
+		colorizerValuePool.Put(bufPtr)
+	}
 	return chunk.Points
 }
 
@@ -285,8 +466,8 @@ func (c *Colorizer) Close() error {
 	return nil
 }
 
-// freeze builds the write-phase mapping from the observed range exactly once
-// per run; concurrent callers get the same mapping.
+// freeze builds the write-phase mapping from the observed distribution
+// exactly once per run; concurrent callers get the same mapping.
 func (c *Colorizer) freeze() *frozenMapping {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -296,13 +477,30 @@ func (c *Colorizer) freeze() *frozenMapping {
 	f := &frozenMapping{}
 	if c.seen {
 		mn, mx := c.min, c.max
+		// stretch to the estimated percentiles; the estimates only exist
+		// after enough observations, otherwise min/max is used as is
+		if c.qLow != nil {
+			if v, ok := c.qLow.estimate(); ok && v > mn {
+				mn = v
+			}
+		}
+		if c.qHigh != nil {
+			if v, ok := c.qHigh.estimate(); ok && v < mx {
+				mx = v
+			}
+		}
+		if mn >= mx {
+			// degenerate stretch (e.g. near-constant data): fall back to the
+			// full observed range
+			mn, mx = c.min, c.max
+		}
 		if mn == mx {
 			// a single-valued attribute has no meaningful range: widen it so
 			// every point maps to the gradient midpoint.
 			mn -= 0.5
 			mx += 0.5
 		}
-		if m, err := newColorMapping(c.attribute, mn, mx, c.gradient); err == nil {
+		if m, err := newColorMapping(c.attribute, mn, mx, c.gradient, c.blend); err == nil {
 			f.m = m
 		}
 	}
@@ -310,48 +508,35 @@ func (c *Colorizer) freeze() *frozenMapping {
 	return f
 }
 
-// chunkValueRange returns the min and max finite values of the attribute in
-// the chunk, or ok=false when the chunk holds none.
-func chunkValueRange(attribute string, chunk PointChunk) (mn, mx float64, ok bool) {
-	observe := func(v float64) {
-		if !ok {
-			mn, mx, ok = v, v, true
-			return
-		}
-		if v < mn {
-			mn = v
-		}
-		if v > mx {
-			mx = v
-		}
-	}
+// forEachChunkValue calls yield with every finite value of the attribute in
+// the chunk.
+func forEachChunkValue(attribute string, chunk PointChunk, yield func(float64)) {
 	if fieldValue := colorizerPointFieldGetter(attribute); fieldValue != nil {
 		for i := range chunk.Points {
 			v := fieldValue(chunk.Points[i])
 			if !isFinite(v) {
 				continue
 			}
-			observe(v)
+			yield(v)
 		}
-		return mn, mx, ok
+		return
 	}
 	layout := model.NewAttributeView(chunk.AttributeLayout, nil)
 	attrIndex := layout.Index(attribute)
 	if attrIndex < 0 {
-		return 0, 0, false
+		return
 	}
 	extract := attributeFloat64Extractor(layout.Type(attrIndex))
 	if extract == nil {
-		return 0, 0, false
+		return
 	}
 	for i := range chunk.Points {
 		v, vok := extract(chunk.AttributeView(i), attrIndex)
 		if !vok {
 			continue
 		}
-		observe(v)
+		yield(v)
 	}
-	return mn, mx, ok
 }
 
 // colorMapping colors points by mapping a numeric per-point attribute over an
@@ -362,11 +547,12 @@ type colorMapping struct {
 	nums      []float64
 	colors    []Color
 	mode      GradientInterpolationMode
+	blend     float64
 }
 
 // newColorMapping builds a mapping scaling the gradient stops so normalized 0
 // maps to minRange and 1 maps to maxRange. attribute must be canonical.
-func newColorMapping(attribute string, minRange, maxRange float64, gradient ColorGradientScale) (*colorMapping, error) {
+func newColorMapping(attribute string, minRange, maxRange float64, gradient ColorGradientScale, blend float64) (*colorMapping, error) {
 	if !isFinite(minRange) || !isFinite(maxRange) {
 		return nil, fmt.Errorf("colorizer range must be finite")
 	}
@@ -384,6 +570,7 @@ func newColorMapping(attribute string, minRange, maxRange float64, gradient Colo
 		nums:      nums,
 		colors:    colors,
 		mode:      gradient.InterpolationMode,
+		blend:     blend,
 	}, nil
 }
 
@@ -425,9 +612,28 @@ func (c *colorMapping) mutateChunk(chunk PointChunk) []model.Point {
 
 func (c *colorMapping) colorizePoint(pt *model.Point, value float64) {
 	color := c.color(value)
-	pt.R = color.R
-	pt.G = color.G
-	pt.B = color.B
+	if c.blend >= 1 {
+		pt.R = color.R
+		pt.G = color.G
+		pt.B = color.B
+		return
+	}
+	pt.R = blendChannel(pt.R, color.R, c.blend)
+	pt.G = blendChannel(pt.G, color.G, c.blend)
+	pt.B = blendChannel(pt.B, color.B, c.blend)
+}
+
+// blendChannel mixes the original channel value with the gradient one:
+// alpha 1 is gradient only, alpha 0 would be the original color.
+func blendChannel(orig, grad uint8, alpha float64) uint8 {
+	v := float64(orig)*(1-alpha) + float64(grad)*alpha
+	if v <= 0 {
+		return 0
+	}
+	if v >= 255 {
+		return 255
+	}
+	return uint8(math.Round(v))
 }
 
 func colorizerPointField(attribute string) bool {

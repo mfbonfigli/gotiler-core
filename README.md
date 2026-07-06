@@ -268,11 +268,26 @@ opts := tiler.NewTilerOptions(
 `NewZOffset` shifts local Z coordinates.
 `NewWithheldFilter` discards points whose `withheld` attribute is true.
 `NewColorizer` maps a numeric attribute or local point coordinate (`x`, `y`,
-or `z`) to point RGB values using a registered gradient alias. Available
-aliases are: `grayscale`, `heat`, `viridis`, and `las-classification`. 
+or `z`) to point RGB values using a registered gradient alias. Built-in
+gradients are the perceptually uniform `viridis`, `magma`, `inferno`,
+`plasma`, `cividis` and `turbo` (embedded as their canonical 256-entry lookup
+tables, see THIRD-PARTY-LICENSES.md), plus `grayscale`, `heat`, and
+`las-classification`.
 
-No scale bounds are needed: the gradient stretches over the observed range, unless
-the gradient definition fixes it to a specific value range.
+No scale bounds are needed: by default the gradient is stretched between the
+2nd and 98th percentile of the observed values (estimated in constant memory
+with the P² algorithm), so outliers and skewed distributions — typical for
+intensity or amplitude — do not wash out the ramp. Rendering is configurable
+through options:
+
+```go
+colorizer, err := mutator.NewColorizer(model.AttrIntensity, "viridis",
+	mutator.WithStretch(5, 95), // percentile stretch; (0, 100) = plain min/max
+	mutator.WithReverse(),      // reverse the color order
+	mutator.WithSteps(8),       // quantize into 8 discrete bands
+	mutator.WithBlend(0.5),     // mix gradient and original color evenly
+)
+```
 
 Gradients whose stops encode absolute values can opt out of the automatic
 scaling by declaring a fixed range in their definition (`FixedRange`,
