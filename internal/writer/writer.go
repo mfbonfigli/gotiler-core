@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/mfbonfigli/gotiler-core/tiler/encoding"
 	"github.com/mfbonfigli/gotiler-core/tiler/model"
 	"github.com/mfbonfigli/gotiler-core/tiler/plugin"
 	"github.com/mfbonfigli/gotiler-core/tiler/tree"
@@ -288,6 +289,7 @@ func (w *StandardWriter) writeSquashedTileset(t tree.Tree, wp plugin.WriterProvi
 		GeometricError: t.RootNode().GeometricError() * w.geCorrection,
 		Root:           rootTile,
 	}
+	w.applyAttributeRangeMetadata(&tileset, t)
 
 	file, err := json.Marshal(tileset)
 	if err != nil {
@@ -309,6 +311,97 @@ func (w *StandardWriter) writeSquashedTileset(t tree.Tree, wp plugin.WriterProvi
 	}
 	closed = true
 	return out.Close()
+}
+
+// applyAttributeRangeMetadata adds the dataset-global minimum and maximum of
+// every exported per-point attribute to the tileset, so clients can build
+// shaders and gradients without scanning the tiles. 3D Tiles 1.0 uses the
+// top-level "properties" dictionary keyed by the per-point property name;
+// 3D Tiles 1.1 uses the core metadata mechanism: a schema plus a tileset
+// metadata entity with MIN_/MAX_-prefixed properties. Ranges are emitted for
+// every selected attribute with observed values, even when the tile format
+// cannot carry the per-point data (e.g. 64-bit integers): the metadata is
+// then the only surviving trace of the attribute.
+func (w *StandardWriter) applyAttributeRangeMetadata(tileset *Tileset, t tree.Tree) {
+	provider, ok := t.(tree.AttributeSummaryProvider)
+	if !ok {
+		return
+	}
+	if w.tilesetVersion == version.TilesetVersion_1_0 {
+		props := map[string]PropertyMinMax{}
+		for _, s := range provider.AttributeSummaries() {
+			mn, mx, ok := summaryRange(s)
+			if !ok {
+				continue
+			}
+			props[encoding.AttributeOutputName(s.Name)] = PropertyMinMax{Minimum: mn, Maximum: mx}
+		}
+		if len(props) > 0 {
+			tileset.Properties = props
+		}
+		return
+	}
+
+	classProps := map[string]TilesetClassProperty{}
+	values := map[string]any{}
+	for _, s := range provider.AttributeSummaries() {
+		mn, mx, ok := summaryRange(s)
+		if !ok {
+			continue
+		}
+		metaType, componentType, err := encoding.GltfMetadataComponentType(s.Type)
+		if err != nil {
+			continue
+		}
+		id := encoding.MetadataPropertyID(encoding.AttributeOutputName(s.Name))
+		property := TilesetClassProperty{Type: metaType, ComponentType: componentType}
+		classProps["MIN_"+id] = property
+		classProps["MAX_"+id] = property
+		values["MIN_"+id] = mn
+		values["MAX_"+id] = mx
+	}
+	if len(values) == 0 {
+		return
+	}
+	tileset.Schema = &TilesetSchema{
+		ID: "gotiler_dataset",
+		Classes: map[string]TilesetSchemaClass{
+			"dataset": {Properties: classProps},
+		},
+	}
+	tileset.Metadata = &TilesetMetadata{
+		Class:      "dataset",
+		Properties: values,
+	}
+}
+
+// summaryRange unboxes the global min/max of an exported attribute summary
+// into JSON-encodable values. Booleans are exposed as 0/1, matching their
+// per-point representation in the tiles. Incomplete attributes and
+// attributes with no observed values are skipped.
+func summaryRange(s model.AttributeSummary) (mn, mx any, ok bool) {
+	if s.SkipIncomplete || s.Min == nil || s.Max == nil {
+		return nil, nil, false
+	}
+	unbox := func(v any) (any, bool) {
+		switch x := v.(type) {
+		case int64, uint64, float64:
+			return x, true
+		case bool:
+			if x {
+				return 1, true
+			}
+			return 0, true
+		default:
+			return nil, false
+		}
+	}
+	mn, okMin := unbox(s.Min)
+	mx, okMax := unbox(s.Max)
+	if !okMin || !okMax {
+		return nil, nil, false
+	}
+	return mn, mx, true
 }
 
 // buildTileTree builds the complete tile hierarchy for squashed mode

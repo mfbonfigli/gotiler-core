@@ -75,6 +75,29 @@ func AttributePrimitiveName(canonical string) string {
 	return "_" + AttributeOutputName(canonical)
 }
 
+// MetadataPropertyID transforms a name into a valid 3D Metadata property or
+// schema identifier (matching ^[a-zA-Z_][a-zA-Z0-9_]*$): invalid characters
+// become underscores and a leading digit gets an underscore prefix.
+func MetadataPropertyID(name string) string {
+	var b strings.Builder
+	b.Grow(len(name) + 1)
+	for i, r := range name {
+		valid := r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if !valid {
+			b.WriteByte('_')
+			continue
+		}
+		if i == 0 && r >= '0' && r <= '9' {
+			b.WriteByte('_')
+		}
+		b.WriteRune(r)
+	}
+	if b.Len() == 0 {
+		return "_"
+	}
+	return b.String()
+}
+
 // PntsSupportsType reports whether the type can be stored in a PNTS batch
 // table binary. 64-bit integers have no PNTS component type.
 func PntsSupportsType(t model.AttributeType) bool {

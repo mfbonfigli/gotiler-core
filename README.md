@@ -238,6 +238,27 @@ opts := tiler.NewTilerOptions(
 )
 ```
 
+### Tileset attribute metadata
+
+For every exported attribute, the dataset-global minimum and maximum values
+are written to `tileset.json`, so clients can build shaders and color
+gradients without scanning the tiles:
+
+- **3D Tiles 1.1** uses the core metadata mechanism: a tileset `schema` plus a
+  `metadata` entity with `MIN_`/`MAX_`-prefixed properties (e.g.
+  `MIN_INTENSITY`, `MAX_INTENSITY`), exposed by CesiumJS as
+  `tileset.metadata`.
+- **3D Tiles 1.0** uses the top-level `properties` dictionary keyed by the
+  per-point property name (e.g. `"INTENSITY": {"minimum": 12, "maximum":
+  833}`), exposed by CesiumJS as `tileset.properties`.
+
+The ranges reflect the values after read-time mutators and are emitted even
+for attributes whose per-point data the tile format cannot carry (e.g. 64-bit
+integers), where the metadata is the only surviving trace of the attribute.
+Note that 3D Tiles 1.1 stores per-point `float64` values as lossy `float32`
+while the metadata keeps full precision: clients should clamp when
+normalizing.
+
 ## Mutators
 
 Mutators can transform or discard points after coordinate conversion and before

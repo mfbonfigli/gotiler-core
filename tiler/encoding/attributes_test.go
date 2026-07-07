@@ -89,3 +89,20 @@ func TestBuildGltfMetadataJSON(t *testing.T) {
 		t.Errorf("propertyAttributes should reference _GPS_TIME, got:\n%s", got)
 	}
 }
+
+func TestMetadataPropertyID(t *testing.T) {
+	cases := map[string]string{
+		"INTENSITY":         "INTENSITY",
+		"GPS_TIME":          "GPS_TIME",
+		"TRUE-VIEW.ANGLE":   "TRUE_VIEW_ANGLE",
+		"3D_FIELD":          "_3D_FIELD",
+		"":                  "_",
+		"ÅNGLE":             "_NGLE",
+		"already_valid_123": "already_valid_123",
+	}
+	for in, want := range cases {
+		if got := MetadataPropertyID(in); got != want {
+			t.Errorf("MetadataPropertyID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
