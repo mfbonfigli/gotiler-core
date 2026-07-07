@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mfbonfigli/gotiler-core/internal/conv/coor/proj"
+	"github.com/mfbonfigli/gotiler-core/internal/conv/coor/static"
 	"github.com/mfbonfigli/gotiler-core/internal/pc"
 	"github.com/mfbonfigli/gotiler-core/internal/tree/kd"
 	"github.com/mfbonfigli/gotiler-core/internal/utils"
@@ -198,6 +199,30 @@ func (t *GoTiler) processFiles(inputFiles []string, outputFolder string, sourceC
 		})
 		return err
 	}
+	// Placement mode georeferences local cartesian input through a fixed
+	// transform: the reader gets the local sentinel CRS and CRS conversion is
+	// replaced by the placement transform to EPSG:4978.
+	convFactory := t.convFactory
+	if opts.placement != nil {
+		if sourceCRS != "" {
+			err := fmt.Errorf("a placement and a source CRS are mutually exclusive: placement applies to ungeoreferenced input only")
+			tree.ReportProgress(reporter, tree.ProgressUpdate{
+				Phase:       "preparation",
+				Percent:     -1,
+				Message:     err.Error(),
+				IsMilestone: true,
+			})
+			return err
+		}
+		placementTransform, err := opts.placement.Transform()
+		if err != nil {
+			return err
+		}
+		convFactory = func() (coor.Converter, error) {
+			return static.NewConverter(placementTransform), nil
+		}
+		sourceCRS = pointcloud.CRSLocal
+	}
 	pointcloudFile, err := t.pointcloudReaderProvider(inputFiles, sourceCRS, opts.eightBitColors, inputAttributes)
 	if err != nil {
 		tree.ReportProgress(reporter, tree.ProgressUpdate{
@@ -220,7 +245,7 @@ func (t *GoTiler) processFiles(inputFiles []string, outputFolder string, sourceC
 	})
 
 	// PHASES 2+3: READING + SPLITTING — reservoir sampling and leaf distribution
-	err = tr.Load(pointcloudFile, t.convFactory, mutatorPipeline, ctx, reporter)
+	err = tr.Load(pointcloudFile, convFactory, mutatorPipeline, ctx, reporter)
 	if err != nil {
 		return err
 	}

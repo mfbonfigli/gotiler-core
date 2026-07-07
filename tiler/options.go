@@ -11,6 +11,7 @@ import (
 
 type TilerOptions struct {
 	mutators              []mutator.Mutator
+	placement             *Placement
 	refineMode            model.RefineMode
 	eightBitColors        bool
 	numWorkers            int
@@ -67,6 +68,11 @@ func (opts *TilerOptions) validate() error {
 	if err := opts.validateEncoder(); err != nil {
 		return err
 	}
+	if opts.placement != nil {
+		if _, err := opts.placement.Transform(); err != nil {
+			return err
+		}
+	}
 	if opts.PointsPerTile <= 0 {
 		return fmt.Errorf("points per tile must be greater than zero, got %d", opts.PointsPerTile)
 	}
@@ -90,6 +96,16 @@ func (opts *TilerOptions) validateEncoder() error {
 		return fmt.Errorf("geometry encoder %q returned nil", opts.encoderID)
 	}
 	return nil
+}
+
+// WithPlacement enables ungeoreferenced input mode: no CRS is required, the
+// input coordinates are treated as a local cartesian system in meters and
+// placed on the globe according to the given Placement. Mutually exclusive
+// with providing a source CRS.
+func WithPlacement(p Placement) tilerOptionsFn {
+	return func(opt *TilerOptions) {
+		opt.placement = &p
+	}
 }
 
 // WithMutators adds the specified list of mutators to the processing step of the cloud

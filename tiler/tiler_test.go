@@ -2,9 +2,11 @@ package tiler
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/mfbonfigli/gotiler-core/internal/pc"
@@ -238,6 +240,84 @@ func TestTilerProcessFileWrapsTreeForWriteMutators(t *testing.T) {
 	}
 	if pt.R != 42 {
 		t.Fatalf("expected write-mutated point, got R=%d", pt.R)
+	}
+}
+
+func TestTilerProcessFileWithPlacement(t *testing.T) {
+	tiler, err := NewGoTiler()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	w := &writer.MockWriter{}
+	tr := &testtree.MockNode{}
+	l := &pc.MockLasReader{}
+	opts := NewDefaultTilerOptions()
+	opts.Apply(WithPlacement(Placement{Longitude: 90, Height: 100}))
+	var readerCRS string
+	tiler.writerProvider = func(folder string, opts *TilerOptions) (writer.Writer, error) {
+		return w, nil
+	}
+	tiler.treeProvider = func(opts tree.Options, output string) tree.Tree {
+		return tr
+	}
+	tiler.pointcloudReaderProvider = func(inputFiles []string, sourceCRS string, eightbit bool, attrs model.Attributes) (pointcloud.Reader, error) {
+		readerCRS = sourceCRS
+		return l, nil
+	}
+
+	if err := tiler.ProcessFiles([]string{"abc.las"}, "out", "", opts, context.TODO()); err != nil {
+		t.Fatalf("ProcessFiles: %v", err)
+	}
+	if readerCRS != pointcloud.CRSLocal {
+		t.Fatalf("expected reader to receive the local CRS sentinel, got %q", readerCRS)
+	}
+	// the converter handed to the tree must be the placement one: it maps the
+	// local origin to the configured spot on the globe (lon 90, height 100)
+	if tr.ConvFactory == nil {
+		t.Fatal("expected a converter factory")
+	}
+	conv, err := tr.ConvFactory()
+	if err != nil {
+		t.Fatalf("ConvFactory: %v", err)
+	}
+	got, err := conv.ToWGS84Cartesian(pointcloud.CRSLocal, model.Vector{})
+	if err != nil {
+		t.Fatalf("ToWGS84Cartesian: %v", err)
+	}
+	if math.Abs(got.X) > 1e-6 || math.Abs(got.Y-(6378137+100)) > 1e-6 || math.Abs(got.Z) > 1e-6 {
+		t.Fatalf("expected placement origin at lon 90 height 100, got %+v", got)
+	}
+	// CRS transformations must be unavailable in placement mode
+	if _, err := conv.Transform("EPSG:4326", "EPSG:4978", model.Vector{}); err == nil {
+		t.Fatal("expected CRS transformations to be unavailable in placement mode")
+	}
+}
+
+func TestTilerProcessFileRejectsPlacementWithCRS(t *testing.T) {
+	tiler, err := NewGoTiler()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	w := &writer.MockWriter{}
+	tr := &testtree.MockNode{}
+	opts := NewDefaultTilerOptions()
+	opts.Apply(WithPlacement(Placement{}))
+	tiler.writerProvider = func(folder string, opts *TilerOptions) (writer.Writer, error) {
+		return w, nil
+	}
+	tiler.treeProvider = func(opts tree.Options, output string) tree.Tree {
+		return tr
+	}
+	tiler.pointcloudReaderProvider = func(inputFiles []string, sourceCRS string, eightbit bool, attrs model.Attributes) (pointcloud.Reader, error) {
+		return &pc.MockLasReader{}, nil
+	}
+
+	err = tiler.ProcessFiles([]string{"abc.las"}, "out", "EPSG:32633", opts, context.TODO())
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected placement+CRS to be rejected, got %v", err)
+	}
+	if tr.LoadCalled {
+		t.Fatal("expected the run to abort before loading")
 	}
 }
 

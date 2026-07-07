@@ -37,6 +37,18 @@ func NewTransform(fwd [4][4]float64) Transform {
 	}
 }
 
+// NewTransformWithInverse returns a transform from the given forward matrix
+// and its inverse. Use it when the forward matrix is not a pure
+// roto-translation (e.g. it carries a uniform scale), where NewTransform's
+// transpose-based inversion would be incorrect. The caller guarantees that
+// inv is the inverse of fwd.
+func NewTransformWithInverse(fwd, inv [4][4]float64) Transform {
+	return Transform{
+		forward: fwd,
+		inverse: inv,
+	}
+}
+
 // Forward transforms the given Vector from the source to the destination CRS
 func (q Transform) Forward(v Vector) Vector {
 	return q.transform(v, q.forward)

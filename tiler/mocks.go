@@ -25,6 +25,7 @@ type MockTiler struct {
 	InitialGeometricError float64
 	GECorrection          float64
 	Attributes            model.Attributes
+	Placement             *Placement
 	err                   error
 }
 
@@ -43,6 +44,7 @@ func (m *MockTiler) ProcessFiles(inputFiles []string, outputFolder string, sourc
 	m.InitialGeometricError = opts.initialGeometricError
 	m.GECorrection = opts.geCorrection
 	m.Attributes = opts.attributes
+	m.Placement = opts.placement
 	return m.err
 }
 
@@ -61,5 +63,6 @@ func (m *MockTiler) ProcessFolder(inputFolder, outputFolder string, sourceCRS st
 	m.InitialGeometricError = opts.initialGeometricError
 	m.GECorrection = opts.geCorrection
 	m.Attributes = opts.attributes
+	m.Placement = opts.placement
 	return m.err
 }

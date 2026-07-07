@@ -5,6 +5,13 @@ import (
 	"github.com/mfbonfigli/gotiler-core/tiler/model"
 )
 
+// CRSLocal is the sentinel CRS marking ungeoreferenced input: point
+// coordinates are treated as a local Z-up cartesian system in meters and
+// placed on the globe through a Placement transform instead of a CRS
+// conversion. Readers receive it as an ordinary CRS string; converters in
+// placement mode ignore it.
+const CRSLocal = "local"
+
 // Reader reads point-cloud points and source CRS metadata.
 type Reader interface {
 	NumberOfPoints() int
